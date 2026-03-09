@@ -1,0 +1,29 @@
+{
+  "name": "pulse",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run dev --workspace=apps/api",
+    "dev:landing": "npm run dev --workspace=@pulse/landing",
+    "dev:bot": "npx ts-node -r tsconfig-paths/register --project apps/tg-bot/tsconfig.json apps/tg-bot/src/index.ts",
+    "dev:stream": "npx ts-node -r tsconfig-paths/register --project services/stream/tsconfig.json services/stream/src/index.ts",
+    "dev:stream:debug": "npx ts-node -r tsconfig-paths/register --project services/stream/tsconfig.json services/stream/src/debug-ws.ts",
+    "dev:engine": "npx ts-node -r tsconfig-paths/register --project services/engine/tsconfig.json services/engine/src/index.ts",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "install:all": "npm install",
+    "bags:smoke": "npx ts-node -r dotenv/config -r tsconfig-paths/register --project tsconfig.json scripts/bags-smoke-readonly.ts",
+    "bags:enrich": "npx ts-node -r dotenv/config -r tsconfig-paths/register --project tsconfig.json scripts/bags-enrich-launch-candidates.ts",
+    "bags:enricher": "npx ts-node -r dotenv/config -r tsconfig-paths/register --project tsconfig.json services/bags-enricher/src/index.ts",
+    "db:migrate": "npx ts-node -r dotenv/config -r tsconfig-paths/register --project tsconfig.json scripts/apply-db-migrations.ts",
+    "supabase:smoke": "npx ts-node -r dotenv/config -r tsconfig-paths/register --project tsconfig.json scripts/supabase-smoke.ts"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

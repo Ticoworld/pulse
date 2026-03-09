@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "baseUrl": ".",
+    "paths": {
+      "@pulse/db": ["packages/db/src/index.ts"],
+      "@pulse/common": ["packages/common/src/index.ts"],
+      "@pulse/bags": ["packages/bags/src/index.ts"],
+      "@pulse/bags-enricher": ["packages/bags-enricher/src/index.ts"]
+    }
+  },
+  "exclude": ["node_modules", "dist"]
+}

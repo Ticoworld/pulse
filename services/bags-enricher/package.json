@@ -1,0 +1,22 @@
+{
+  "name": "@pulse/bags-enricher-service",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "ts-node -r dotenv/config -r tsconfig-paths/register src/index.ts",
+    "build": "tsc",
+    "start": "node -r dotenv/config dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pulse/bags-enricher": "*",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.5",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.3.3"
+  }
+}

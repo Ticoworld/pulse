@@ -1,0 +1,53 @@
+# Dependencies
+**/node_modules/
+
+# Build outputs
+**/dist/
+**/build/
+**/.next/
+
+# Logs
+**/*.log
+**/logs/
+
+# Environment files
+**/.env
+**/.env.*
+!**/.env.example
+
+# Docker
+**/docker-compose*.yml
+**/Dockerfile*
+
+# Database migrations history (keep schema, ignore run history)
+**/migrations/*.sql
+
+# Test coverage
+**/coverage/
+
+# Cache
+**/.cache/
+**/.turbo/
+
+# Redis dump
+dump.rdb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Package locks (cursor doesn't need these)
+**/package-lock.json
+**/yarn.lock
+**/pnpm-lock.yaml
+
+# Generated types (cursor can infer from source)
+**/*.d.ts
+
+# Temporary files
+**/*.tmp
+**/*.temp
