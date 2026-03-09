@@ -1,4 +1,4 @@
-import type { RawEvent, EventType } from "../../../packages/common/src/index";
+import type { RawEvent, EventType } from "@pulse/common";
 
 export type { RawEvent, EventType };
 

@@ -1,7 +1,7 @@
 import crypto from "crypto";
-import type { RawEvent } from "../../../packages/common/src/index";
+import type { RawEvent } from "@pulse/common";
 import type { HeliusTransaction } from "./types";
-import { insertRawEvent } from "../../../packages/db/src/index";
+import { insertRawEvent } from "@pulse/db";
 
 /** Helius transaction type strings we care about in Phase 1 */
 const SWAP_TYPES = new Set([
