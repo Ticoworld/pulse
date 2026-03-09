@@ -92,6 +92,18 @@ const sendOwnerAlert = createOwnerAlertSender({
   botTokenForRedaction: token,
 });
 
+bot.setMyCommands([
+  { command: "start", description: "Start the bot" },
+  { command: "help", description: "Show command list" },
+  { command: "top_candidates", description: "Launch and alpha signals (24h)" },
+  { command: "mint", description: "Query a mint for Bags context" },
+  { command: "follow", description: "Follow a mint for alerts" },
+  { command: "unfollow", description: "Unfollow a mint" },
+  { command: "following", description: "List your followed mints" },
+]).catch((err) => {
+  console.error("[tg-bot] setMyCommands failed:", err);
+});
+
 bot.on("polling_error", (err) => {
   console.error("[tg-bot] polling_error:", formatErrorForLog(err, token));
 });

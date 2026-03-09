@@ -1,74 +1,116 @@
 # Pulse
 
-Solana trading intelligence platform — TypeScript monorepo.
+Bags Alpha Intelligence — Telegram-first launch and alpha signals for the Bags ecosystem. TypeScript monorepo.
 
-## Structure
+**What it is:** A bot that surfaces high-signal Bags launch candidates and dev-wallet context via Telegram. Public commands: `/top_candidates`, `/mint`, `/follow`. DB-backed signals and Bags API enrichment; no live trading.
+
+**What it is not:** Production-hardened infra, a web dashboard, or a generic Solana trading bot. Execution is stubbed; observability and migration tooling are minimal.
+
+---
+
+## Repo structure
 
 ```
 apps/
-  api/        → Express REST API
-  tg-bot/     → Telegram bot
+  api/        → Express API (health only)
+  tg-bot/     → Telegram bot (polling; commands + follow alerts)
+  landing/    → Single-page marketing site (Vite + React + Tailwind)
 
 packages/
   common/     → Shared config and types
-  db/         → Database client (Prisma / future)
+  db/         → Postgres client (raw pg), schema, SQL migrations
+  bags/       → Bags API client (read-only, rate-limited)
+  bags-enricher/ → Enrichment runner (launch candidates → Bags)
 
 services/
-  stream/     → Solana data streaming (future)
-  engine/     → Signal engine (future)
-  executor/   → Trade execution (future)
+  stream/     → Helius WebSocket + HTTP → raw_events
+  engine/     → Polling engine (candidates, signals, scoring)
+  executor/   → Execution state machine (Solana tx stubbed)
+  bags-enricher/ → Long-running enrichment service
 
 infra/
-  docker-compose.yml  → Postgres + Redis
+  docker-compose.yml  → Local Postgres + Redis (Redis unused in code)
+
+docs/
+  PHASE0_MASTER_CONTEXT.md  → Product and architecture context
+  phases/     → Phase specs (Bags, Telegram, follow alerts, landing)
+  deployment/ → Supabase, hosting (Vercel, Railway)
+  archive/     → PM signoffs, audits, review artifacts
 ```
 
-Phase and deployment notes live in `docs/` (including `docs/phases/` and `docs/deployment/`).
+---
 
-## Setup
+## Local development
 
 ```bash
-# 1. Copy environment variables
+# 1. Env
 cp .env.example .env
+# Set at least: DATABASE_URL, TELEGRAM_BOT_TOKEN, TELEGRAM_OWNER_CHAT_ID, BAGS_API_KEY, HELIUS_API_KEY, SUPABASE_URL, SUPABASE_ANON_KEY
 
-# 2. Install all dependencies
+# 2. Install
 npm install
 
-# 3. Start infrastructure (requires Docker)
-docker compose -f infra/docker-compose.yml up -d
+# 3. Database (Supabase or local Postgres)
+npm run db:migrate
+npm run supabase:smoke   # optional; verifies DB and tables
 
-# 4. Run the API (port 3000 by default)
-npm run dev:api
-
-# 5. Run the Telegram bot
-npm run dev:bot
+# 4. Run what you need
+npm run dev:api          # API on port 3000
+npm run dev:bot          # Telegram bot (polling)
+npm run dev:landing      # Landing page (Vite, default port 5173)
 ```
 
-## Health check
+**Health check:** `curl http://localhost:3000/health` → `{ "ok": true, "service": "api" }`
 
-```bash
-curl http://localhost:3000/health
-# → { "ok": true, "service": "api" }
-```
+---
 
-## Bags (Phase 1 — read-only foundation)
+## Landing page
 
-Read-only Bags API client lives in `packages/bags` and uses the official `@bagsfm/bags-sdk`. No engine, Telegram, or schema changes in this phase.
+- **Dev:** `npm run dev:landing` (Vite dev server, port 5173).
+- **Build:** `npm run build --workspace=@pulse/landing`
+- **Output:** `apps/landing/dist` (static assets + index.html)
+- **Links (Telegram, GitHub):** Edit `apps/landing/src/config.ts` before deploy. All CTAs and footer use that file.
 
-**Env (add to `.env`):**
+Intended for deployment on **Vercel**. See `docs/deployment/DEPLOYMENT_PHASE10C_HOSTING.md`.
 
-- `BAGS_API_KEY` — from [dev.bags.fm](https://dev.bags.fm/)
-- `SOLANA_RPC_URL` — e.g. `https://api.mainnet-beta.solana.com` or your RPC
+---
 
-**Smoke script:**
+## Telegram bot
 
-```bash
-npm run bags:smoke
-# Or with a mint: npm run bags:smoke -- CyXBDcVQuHyEDbG661Jf3iHqxyd9wNHhE2SiQdNrBAGS
-# Or set BAGS_SMOKE_MINT in .env
-```
+- **Dev:** `npm run dev:bot` (ts-node, loads `.env` via dotenv)
+- **Build:** `npm run build --workspace=@pulse/tg-bot` → outputs to `apps/tg-bot/dist`
+- **Start (hosted):** `npm run start --workspace=@pulse/tg-bot` (from repo root) or from `apps/tg-bot`: `npm run build && npm start`
 
-**Success:** Script prints normalized token creators and lifetime fees for the mint and exits 0. No DB writes.
+Uses **polling**; must run as a persistent process. Intended for deployment on **Railway**. Required env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID`, `DATABASE_URL`. See `docs/deployment/DEPLOYMENT_PHASE10C_HOSTING.md` and `.env.example`.
 
-**Failure:** On missing/invalid API key (401), permissions (403), or rate limit (429), the script prints the error code and message and exits 1. Invalid mint or RPC issues also exit 1.
+---
 
-**Limitations (Phase 1):** In-process rate cap only (soft 800/hour). No ping/health endpoint. Raw endpoint paths and response schemas are not used — SDK is the source. See `docs/BAGS_DOCS_TRUTH.md` for what is confirmed vs unknown.
+## Supabase (DB) and migrations
+
+- **Apply migrations:** `npm run db:migrate`  
+  Reads SQL from `packages/db/src/migrations/` in sorted order; tracks applied in `schema_migrations`.
+- **Smoke test:** `npm run supabase:smoke`  
+  Checks connection and required tables; runs a safe write/read/delete probe.
+
+See `docs/deployment/DEPLOYMENT_PHASE10A_SUPABASE.md` for env vars and first-cutover notes.
+
+---
+
+## Bags API (read-only)
+
+- **Env:** `BAGS_API_KEY`, `SOLANA_RPC_URL` (see `.env.example`)
+- **Smoke:** `npm run bags:smoke`  
+  Prints token creators and lifetime fees for a mint; exits 0 on success, 1 on auth/rate-limit/error.
+
+See `docs/BAGS_DOCS_TRUTH.md` for API behaviour and limits.
+
+---
+
+## Deployment (summary)
+
+| Component   | Intended host | Build / start and env documented in |
+|------------|----------------|----------------------------------------|
+| Landing    | Vercel         | `docs/deployment/DEPLOYMENT_PHASE10C_HOSTING.md` |
+| Telegram bot | Railway      | Same doc + `.env.example` |
+
+No fake production or traction claims. The bot and landing are suitable for hackathon and demo use; observability, auth, and hardening are not in scope for this phase.
