@@ -1,3 +1,5 @@
+// ── Program IDs ────────────────────────────────────────────────────────────
+
 export const RAYDIUM_AMM_V4_PROGRAM_ID =
   "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin";
 export const ORCA_WHIRLPOOL_PROGRAM_ID =
@@ -11,23 +13,27 @@ export const METEORA_DBC_PROGRAM_ID =
   "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN";
 
 // Meteora DAMM v2: post-graduation AMM after DBC bonding curve completes.
-// Higher volume than DBC; opt-in via STREAM_ALLOW_METEORA_DAMM_V2=true.
 // Source: https://docs.bags.fm/principles/program-ids
 export const METEORA_DAMM_V2_PROGRAM_ID =
   "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG";
 
-const DEFAULT_TARGET_PROGRAMS = [
-  RAYDIUM_AMM_V4_PROGRAM_ID, // Raydium AMM v4
-  ORCA_WHIRLPOOL_PROGRAM_ID, // Orca Whirlpool
-  METEORA_DBC_PROGRAM_ID,    // Meteora DBC — Bags token launches and bonding curve trades
+// Legacy Solana programs (Raydium + Orca). Only used in hybrid/legacy mode.
+const LEGACY_TARGET_PROGRAMS = [
+  RAYDIUM_AMM_V4_PROGRAM_ID,
+  ORCA_WHIRLPOOL_PROGRAM_ID,
 ];
+
+// ── Stream constants ───────────────────────────────────────────────────────
 
 export const MAX_BATCH_SIZE = 50;
 export const MAX_PROCESSED_SIGNATURE_CACHE_SIZE = 10_000;
 
 export const BASE_SOL_MINT = "So11111111111111111111111111111111111111112";
 export const BASE_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
 const STABLE_CONNECTION_RESET_MS = 60_000;
+
+// ── Env helpers ────────────────────────────────────────────────────────────
 
 function parseBooleanEnv(name: string, fallback: boolean): boolean {
   const value = process.env[name];
@@ -47,6 +53,80 @@ function parseNumberEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+// ── Stream mode ────────────────────────────────────────────────────────────
+
+export type StreamMode = "bags_only" | "hybrid" | "legacy";
+
+/**
+ * Controls how the stream filters admitted tokens.
+ *
+ *   bags_only (default): only Bags-originated mints enter the pipeline.
+ *     - Helius subscriptions: Meteora DBC + DAMM v2 only.
+ *     - Bags Restream + Pools REST poll are primary sources of truth.
+ *     - Non-Bags mints are dropped with bags_admission_drop.
+ *
+ *   hybrid: Bags ingestion is primary, legacy Solana path can also run.
+ *     - All Helius subscriptions active (Raydium, Orca, DBC, DAMM v2).
+ *     - Bags mints are always admitted; other mints admitted only if
+ *       STREAM_ALLOW_GENERAL_SOLANA=true.
+ *
+ *   legacy: original pre-Bags behavior, no admission filtering.
+ *     - All configured Helius subscriptions active.
+ *     - No Bags origin check. Use for rollback only.
+ */
+export function getStreamMode(): StreamMode {
+  const raw = (process.env.STREAM_MODE ?? "bags_only").trim().toLowerCase();
+  if (raw === "bags_only" || raw === "hybrid" || raw === "legacy") {
+    return raw as StreamMode;
+  }
+  console.warn(`[stream] Unknown STREAM_MODE="${process.env.STREAM_MODE}", defaulting to bags_only`);
+  return "bags_only";
+}
+
+// ── Target Helius programs ─────────────────────────────────────────────────
+
+export function getTargetPrograms(): string[] {
+  const mode = getStreamMode();
+
+  // bags_only: only Meteora programs (all Bags activity flows through these)
+  if (mode === "bags_only") {
+    const explicit = process.env.STREAM_TARGET_PROGRAMS;
+    if (explicit) {
+      return explicit.split(",").map((v) => v.trim()).filter(Boolean);
+    }
+    const programs: string[] = [];
+    if (getStreamAllowMeteoraDbc()) programs.push(METEORA_DBC_PROGRAM_ID);
+    if (getStreamAllowMeteoraDammV2()) programs.push(METEORA_DAMM_V2_PROGRAM_ID);
+    // Always have at least DBC
+    return programs.length > 0 ? programs : [METEORA_DBC_PROGRAM_ID];
+  }
+
+  // hybrid / legacy: broader subscription set
+  const explicit = process.env.STREAM_TARGET_PROGRAMS;
+  let programs: string[] = explicit
+    ? explicit.split(",").map((v) => v.trim()).filter(Boolean)
+    : [...LEGACY_TARGET_PROGRAMS, METEORA_DBC_PROGRAM_ID];
+
+  if (!getStreamAllowJupiterProgram()) {
+    programs = programs.filter((id) => id !== JUPITER_V6_PROGRAM_ID);
+  }
+  if (!getStreamAllowMeteoraDbc()) {
+    programs = programs.filter((id) => id !== METEORA_DBC_PROGRAM_ID);
+  }
+  if (getStreamAllowMeteoraDammV2() && !programs.includes(METEORA_DAMM_V2_PROGRAM_ID)) {
+    programs.push(METEORA_DAMM_V2_PROGRAM_ID);
+  }
+  if (!getStreamAllowGeneralSolana()) {
+    programs = programs.filter(
+      (id) => id !== RAYDIUM_AMM_V4_PROGRAM_ID && id !== ORCA_WHIRLPOOL_PROGRAM_ID,
+    );
+  }
+
+  return programs.length > 0 ? programs : [METEORA_DBC_PROGRAM_ID];
+}
+
+// ── Helius network / URL ───────────────────────────────────────────────────
+
 export function getHeliusNetwork(): "mainnet" | "devnet" {
   const network = process.env.HELIUS_NETWORK || "mainnet";
   if (network !== "mainnet" && network !== "devnet") {
@@ -55,35 +135,6 @@ export function getHeliusNetwork(): "mainnet" | "devnet" {
     );
   }
   return network;
-}
-
-export function getTargetPrograms(): string[] {
-  const configured = process.env.STREAM_TARGET_PROGRAMS;
-  let programs: string[] = configured
-    ? configured
-        .split(",")
-        .map((value) => value.trim())
-        .filter(Boolean)
-    : [...DEFAULT_TARGET_PROGRAMS];
-
-  if (!getStreamAllowJupiterProgram()) {
-    programs = programs.filter((id) => id !== JUPITER_V6_PROGRAM_ID);
-  }
-
-  if (!getStreamAllowMeteoraDbc()) {
-    programs = programs.filter((id) => id !== METEORA_DBC_PROGRAM_ID);
-  }
-
-  // DAMM v2 is off by default (higher volume, post-graduation tokens).
-  // Enable with STREAM_ALLOW_METEORA_DAMM_V2=true.
-  if (
-    getStreamAllowMeteoraDammV2() &&
-    !programs.includes(METEORA_DAMM_V2_PROGRAM_ID)
-  ) {
-    programs.push(METEORA_DAMM_V2_PROGRAM_ID);
-  }
-
-  return programs.length > 0 ? programs : [...DEFAULT_TARGET_PROGRAMS];
 }
 
 export function getHeliusWsBaseUrl(): string {
@@ -96,9 +147,7 @@ export function getHeliusWsBaseUrl(): string {
 
 export function getHeliusHttpUrl(apiKey: string): string {
   const explicitHttp = process.env.HELIUS_RPC_HTTP_URL;
-  if (explicitHttp) {
-    return explicitHttp;
-  }
+  if (explicitHttp) return explicitHttp;
 
   const domain =
     getHeliusNetwork() === "devnet"
@@ -111,6 +160,108 @@ export function getHeliusHttpUrl(apiKey: string): string {
 export function sanitizeHeliusUrl(url: string, apiKey: string): string {
   return url.replace(apiKey, `${apiKey.slice(0, 4)}***${apiKey.slice(-4)}`);
 }
+
+// ── Bags Restream ──────────────────────────────────────────────────────────
+
+/** Enable the Bags Restream WebSocket connection (default: true). */
+export function getStreamAllowBagsRestream(): boolean {
+  return parseBooleanEnv("STREAM_ALLOW_BAGS_RESTREAM", true);
+}
+
+/** Bags Restream WebSocket URL. */
+export function getBagsRestreamUrl(): string {
+  return process.env.BAGS_RESTREAM_URL ?? "wss://restream.bags.fm";
+}
+
+// ── Bags Pools REST polling ────────────────────────────────────────────────
+
+/** Enable periodic Bags Pools REST snapshot polling (default: true). */
+export function getStreamAllowBagsPoolsPoll(): boolean {
+  return parseBooleanEnv("STREAM_ALLOW_BAGS_POOLS_POLL", true);
+}
+
+/** Polling interval for Bags Pools REST API in ms (default: 30 000). */
+export function getStreamBagsPoolsPollMs(): number {
+  return parseNumberEnv("STREAM_BAGS_POOLS_POLL_MS", 30_000);
+}
+
+// ── Bags REST API ──────────────────────────────────────────────────────────
+
+/** Base URL for the Bags Public API v2 (no trailing slash). */
+export function getBagsApiBaseUrl(): string {
+  const url = process.env.BAGS_API_BASE_URL ?? "https://public-api-v2.bags.fm/api/v1";
+  return url.endsWith("/") ? url.slice(0, -1) : url;
+}
+
+/** Optional Bags API key (x-api-key header). */
+export function getBagsApiKey(): string | undefined {
+  return process.env.BAGS_API_KEY || undefined;
+}
+
+// ── Per-program allow flags ────────────────────────────────────────────────
+
+/** Allow Jupiter program subscription (default: false). */
+export function getStreamAllowJupiterProgram(): boolean {
+  return parseBooleanEnv("STREAM_ALLOW_JUPITER_PROGRAM", false);
+}
+
+/**
+ * Allow Meteora DBC subscription (default: true).
+ * This is the primary source for Bags launches; disabling it breaks bags_only mode.
+ */
+export function getStreamAllowMeteoraDbc(): boolean {
+  return parseBooleanEnv("STREAM_ALLOW_METEORA_DBC", true);
+}
+
+/**
+ * Allow Meteora DAMM v2 subscription.
+ * Default: true in bags_only mode (post-graduation Bags AMM trading),
+ *          false in legacy/hybrid (general-purpose AMM, higher volume).
+ */
+export function getStreamAllowMeteoraDammV2(): boolean {
+  const mode = getStreamMode();
+  const defaultVal = mode === "bags_only";
+  return parseBooleanEnv("STREAM_ALLOW_METEORA_DAMM_V2", defaultVal);
+}
+
+/**
+ * Allow general Solana programs (Raydium, Orca) in the subscription.
+ * Default: false. Only relevant in hybrid/legacy mode.
+ * In bags_only mode this is ignored (general programs are never subscribed).
+ */
+export function getStreamAllowGeneralSolana(): boolean {
+  return parseBooleanEnv("STREAM_ALLOW_GENERAL_SOLANA", false);
+}
+
+// ── Helius 429 circuit breaker ─────────────────────────────────────────────
+
+export function getStreamHelius429Threshold(): number {
+  return parseNumberEnv("STREAM_HELIUS_429_THRESHOLD", 3);
+}
+
+export function getStreamHelius429CooldownMs(): number {
+  return parseNumberEnv("STREAM_HELIUS_429_COOLDOWN_MS", 900_000);
+}
+
+export function getStreamStableConnectionResetMs(): number {
+  return STABLE_CONNECTION_RESET_MS;
+}
+
+// ── Queue / throughput ─────────────────────────────────────────────────────
+
+export function getStreamMaxQueueDepth(): number {
+  return parseNumberEnv("STREAM_MAX_QUEUE_DEPTH", 500);
+}
+
+export function getStreamMaxQueuedAgeSeconds(): number {
+  return parseNumberEnv("STREAM_MAX_QUEUED_AGE_SECONDS", 30);
+}
+
+export function getStreamBatchMinSleepMs(): number {
+  return parseNumberEnv("STREAM_BATCH_MIN_SLEEP_MS", 100);
+}
+
+// ── Diagnostics ────────────────────────────────────────────────────────────
 
 export function getStreamDebugMetrics(): boolean {
   return parseBooleanEnv("STREAM_DEBUG_METRICS", false);
@@ -128,64 +279,10 @@ export function getStreamStaleEventWarnSeconds(): number {
   return parseNumberEnv("STREAM_STALE_EVENT_WARN_SECONDS", 120);
 }
 
-export function getStreamAllowJupiterProgram(): boolean {
-  return parseBooleanEnv("STREAM_ALLOW_JUPITER_PROGRAM", false);
-}
-
-// Meteora DBC is enabled by default because it is the primary program for
-// Bags token launches. Disable with STREAM_ALLOW_METEORA_DBC=false if the
-// DBC subscription causes unexpected volume or 429s.
-export function getStreamAllowMeteoraDbc(): boolean {
-  return parseBooleanEnv("STREAM_ALLOW_METEORA_DBC", true);
-}
-
-// Meteora DAMM v2 handles post-graduation AMM trading. It is disabled by
-// default because it is a general-purpose DEX (not Bags-exclusive) and will
-// add significant volume. Enable with STREAM_ALLOW_METEORA_DAMM_V2=true once
-// DBC coverage is confirmed healthy and throughput headroom is verified.
-export function getStreamAllowMeteoraDammV2(): boolean {
-  return parseBooleanEnv("STREAM_ALLOW_METEORA_DAMM_V2", false);
-}
-
-export function getStreamHelius429Threshold(): number {
-  return parseNumberEnv("STREAM_HELIUS_429_THRESHOLD", 3);
-}
-
-export function getStreamHelius429CooldownMs(): number {
-  return parseNumberEnv("STREAM_HELIUS_429_COOLDOWN_MS", 900_000);
-}
-
-export function getStreamStableConnectionResetMs(): number {
-  return STABLE_CONNECTION_RESET_MS;
-}
-
-// Maximum number of signatures held in the in-memory queue at once.
-// When the queue reaches this depth, new admissions are dropped with reason
-// "queue_full". This bounds memory and forces explicit shedding under load
-// rather than silently accumulating unbounded stale work.
-export function getStreamMaxQueueDepth(): number {
-  return parseNumberEnv("STREAM_MAX_QUEUE_DEPTH", 500);
-}
-
-// Signatures that have been waiting in the queue longer than this many seconds
-// are dropped without an HTTP fetch. At 70s queue age the events are already
-// too stale for the engine and tg-bot to act on; spending Helius credits on
-// them only keeps the queue deep. Default is 30s: short enough to purge a
-// runaway backlog quickly, long enough to survive brief Helius HTTP spikes.
-export function getStreamMaxQueuedAgeSeconds(): number {
-  return parseNumberEnv("STREAM_MAX_QUEUED_AGE_SECONDS", 30);
-}
-
-// Minimum sleep between successive HTTP fetch batches when the queue is at or
-// below MAX_BATCH_SIZE (i.e. "caught up"). Set to 0 to disable entirely.
-// When the queue is deeper than MAX_BATCH_SIZE the drain loop skips this sleep
-// and processes the next batch immediately. Replaces the old fixed 3000 ms
-// inter-batch sleep which was the primary self-inflicted throughput bottleneck.
-export function getStreamBatchMinSleepMs(): number {
-  return parseNumberEnv("STREAM_BATCH_MIN_SLEEP_MS", 100);
-}
+// ── Startup config snapshot ────────────────────────────────────────────────
 
 export interface StreamStartupConfig {
+  streamMode: StreamMode;
   targetPrograms: string[];
   batchSize: number;
   batchMinSleepMs: number;
@@ -204,12 +301,19 @@ export interface StreamStartupConfig {
   allowJupiterProgram: boolean;
   allowMeteoraDbc: boolean;
   allowMeteoraDammV2: boolean;
+  allowGeneralSolana: boolean;
+  allowBagsRestream: boolean;
+  allowBagsPoolsPoll: boolean;
+  bagsPoolsPollMs: number;
+  bagsRestreamUrl: string;
+  bagsApiBaseUrl: string;
   helius429Threshold: number;
   helius429CooldownMs: number;
 }
 
 export function getStreamStartupConfig(apiKey: string): StreamStartupConfig {
   return {
+    streamMode: getStreamMode(),
     targetPrograms: getTargetPrograms(),
     batchSize: MAX_BATCH_SIZE,
     batchMinSleepMs: getStreamBatchMinSleepMs(),
@@ -228,6 +332,12 @@ export function getStreamStartupConfig(apiKey: string): StreamStartupConfig {
     allowJupiterProgram: getStreamAllowJupiterProgram(),
     allowMeteoraDbc: getStreamAllowMeteoraDbc(),
     allowMeteoraDammV2: getStreamAllowMeteoraDammV2(),
+    allowGeneralSolana: getStreamAllowGeneralSolana(),
+    allowBagsRestream: getStreamAllowBagsRestream(),
+    allowBagsPoolsPoll: getStreamAllowBagsPoolsPoll(),
+    bagsPoolsPollMs: getStreamBagsPoolsPollMs(),
+    bagsRestreamUrl: getBagsRestreamUrl(),
+    bagsApiBaseUrl: getBagsApiBaseUrl(),
     helius429Threshold: getStreamHelius429Threshold(),
     helius429CooldownMs: getStreamHelius429CooldownMs(),
   };

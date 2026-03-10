@@ -1,7 +1,21 @@
 import "dotenv/config";
 import { HeliusProvider } from "./providers/helius";
+import { BagsRestreamProvider } from "./providers/bags-restream";
 import { processSignature, stopStreamProcessing } from "./stream";
-import { getStreamStartupConfig } from "./config";
+import {
+  getStreamStartupConfig,
+  getStreamAllowBagsRestream,
+  getStreamAllowBagsPoolsPoll,
+  getStreamMode,
+} from "./config";
+import {
+  loadBagsPoolsSnapshot,
+  startBagsPoolsPoller,
+  stopBagsPoolsPoller,
+  registerBagsMint,
+  checkBagsMintViaApi,
+  getBagsMintCount,
+} from "./bags-admission";
 
 const apiKey = process.env.HELIUS_API_KEY;
 
@@ -17,30 +31,144 @@ if (!process.env.DATABASE_URL) {
 
 console.log("[stream] starting Pulse stream service...");
 
-const startupConfig = getStreamStartupConfig(apiKey);
+const cfg = getStreamStartupConfig(apiKey);
+
+// ── Startup config log ─────────────────────────────────────────────────────
+// Print everything that affects the product boundary so it is visible on
+// deploy without needing to read env vars directly.
 console.log(
-  `[stream] startup_config target_programs=${JSON.stringify(
-    startupConfig.targetPrograms,
-  )} batch_size=${startupConfig.batchSize} batch_min_sleep_ms=${startupConfig.batchMinSleepMs} max_queue_depth=${startupConfig.maxQueueDepth} max_queued_age_seconds=${startupConfig.maxQueuedAgeSeconds} replay_mode=${startupConfig.replayMode} backfill_enabled=${startupConfig.backfillEnabled} restart_resume_state=${startupConfig.restartResumeState} helius_ws_base_url=${startupConfig.heliusWsBaseUrl} helius_http_url=${startupConfig.heliusHttpUrl} dedupe_cache_size=${startupConfig.dedupeCacheSize} debug_metrics=${startupConfig.debugMetrics} metrics_interval_ms=${startupConfig.metricsIntervalMs} metrics_every_n_signatures=${startupConfig.metricsEveryNSignatures} stale_event_warn_seconds=${startupConfig.staleEventWarnSeconds} allow_jupiter_program=${startupConfig.allowJupiterProgram} allow_meteora_dbc=${startupConfig.allowMeteoraDbc} allow_meteora_damm_v2=${startupConfig.allowMeteoraDammV2} helius_429_threshold=${startupConfig.helius429Threshold} helius_429_cooldown_ms=${startupConfig.helius429CooldownMs}`,
+  `[stream] startup_config` +
+  ` stream_mode=${cfg.streamMode}` +
+  ` target_programs=${JSON.stringify(cfg.targetPrograms)}` +
+  ` allow_bags_restream=${cfg.allowBagsRestream}` +
+  ` allow_bags_pools_poll=${cfg.allowBagsPoolsPoll}` +
+  ` bags_pools_poll_ms=${cfg.bagsPoolsPollMs}` +
+  ` bags_restream_url=${cfg.bagsRestreamUrl}` +
+  ` bags_api_base_url=${cfg.bagsApiBaseUrl}` +
+  ` allow_meteora_dbc=${cfg.allowMeteoraDbc}` +
+  ` allow_meteora_damm_v2=${cfg.allowMeteoraDammV2}` +
+  ` allow_general_solana=${cfg.allowGeneralSolana}` +
+  ` allow_jupiter_program=${cfg.allowJupiterProgram}` +
+  ` batch_size=${cfg.batchSize}` +
+  ` batch_min_sleep_ms=${cfg.batchMinSleepMs}` +
+  ` max_queue_depth=${cfg.maxQueueDepth}` +
+  ` max_queued_age_seconds=${cfg.maxQueuedAgeSeconds}` +
+  ` helius_ws_base_url=${cfg.heliusWsBaseUrl}` +
+  ` helius_http_url=${cfg.heliusHttpUrl}` +
+  ` debug_metrics=${cfg.debugMetrics}` +
+  ` stale_event_warn_seconds=${cfg.staleEventWarnSeconds}`,
 );
 
-const provider = new HeliusProvider(apiKey, (notice) => {
+// ── Bags Pools snapshot (startup) ──────────────────────────────────────────
+// Load the initial snapshot before starting any providers so that the
+// admission gate has a populated knownBagsMints set from the first tx.
+const mode = getStreamMode();
+
+if (mode !== "legacy" && getStreamAllowBagsPoolsPoll()) {
+  console.log("[stream] bags_pools_snapshot_loading...");
+  loadBagsPoolsSnapshot()
+    .then((newCount) => {
+      console.log(
+        `[stream] bags_pools_snapshot_loaded count=${getBagsMintCount()} new=${newCount}`,
+      );
+      startBagsPoolsPoller();
+    })
+    .catch((err) => {
+      console.error("[stream] bags_pools_snapshot_error (continuing without snapshot):", err);
+      // Still start the poller — it will retry on the next interval
+      startBagsPoolsPoller();
+    });
+} else if (mode !== "legacy") {
+  console.log("[stream] bags_pools_poll disabled (STREAM_ALLOW_BAGS_POOLS_POLL=false)");
+}
+
+// ── Bags Restream provider ─────────────────────────────────────────────────
+
+let bagsRestreamProvider: BagsRestreamProvider | null = null;
+
+if (mode !== "legacy" && getStreamAllowBagsRestream()) {
+  bagsRestreamProvider = new BagsRestreamProvider(
+    (notice) => {
+      // Bags Restream fired with a candidate mint extracted from the protobuf
+      // payload. The extraction is heuristic (first base58-length string field),
+      // so we do NOT trust it blindly. Verify via the Bags REST API first.
+      // Only if the API confirms the mint is a known Bags pool do we register it.
+      //
+      // Restream = speed signal.  REST = truth.
+      //
+      // If the Helius DBC tx arrives before verification completes, the
+      // checkBagsMintViaApi call in checkBagsAdmission() deduplicates with
+      // the in-flight promise from here (see bags-admission.ts pendingChecks).
+      console.log(`[stream] bags_restream_candidate_seen mint=${notice.mint}`);
+      checkBagsMintViaApi(notice.mint)
+        .then((confirmed) => {
+          if (confirmed) {
+            const isNew = registerBagsMint(notice.mint);
+            if (isNew) {
+              console.log(
+                `[stream] bags_admission_accept reason=restream_verified mint=${notice.mint} bags_known_count=${getBagsMintCount()}`,
+              );
+            }
+          } else {
+            console.log(
+              `[stream] bags_restream_candidate_rejected mint=${notice.mint} reason=api_not_found`,
+            );
+          }
+        })
+        .catch((err) => {
+          console.error(
+            `[stream] bags_restream_candidate_check_error mint=${notice.mint}:`,
+            err,
+          );
+        });
+    },
+    () => {
+      // Undecoded message: trigger an immediate Bags Pools API poll to catch
+      // any mint we could not extract from the protobuf payload.
+      loadBagsPoolsSnapshot()
+        .then((newCount) => {
+          if (newCount > 0) {
+            console.log(
+              `[stream] bags_pools_restream_fallback_poll_success new=${newCount} total=${getBagsMintCount()}`,
+            );
+          }
+        })
+        .catch((err) => {
+          console.error("[stream] bags_pools_restream_fallback_poll_error:", err);
+        });
+    },
+  );
+  bagsRestreamProvider.start();
+} else if (mode !== "legacy") {
+  console.log("[stream] bags_restream disabled (STREAM_ALLOW_BAGS_RESTREAM=false)");
+}
+
+// ── Helius provider ────────────────────────────────────────────────────────
+
+const heliusProvider = new HeliusProvider(apiKey, (notice) => {
   processSignature(notice).catch((err) =>
     console.error("[stream] unhandled error in processSignature:", err),
   );
 });
 
-provider.start();
+heliusProvider.start();
+
+// ── Graceful shutdown ──────────────────────────────────────────────────────
+
+function shutdown(): void {
+  console.log("[stream] shutting down...");
+  heliusProvider.stop();
+  bagsRestreamProvider?.stop();
+  stopBagsPoolsPoller();
+  stopStreamProcessing();
+}
 
 process.on("SIGINT", () => {
-  console.log("\n[stream] shutting down...");
-  provider.stop();
-  stopStreamProcessing();
+  shutdown();
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
-  provider.stop();
-  stopStreamProcessing();
+  shutdown();
   process.exit(0);
 });

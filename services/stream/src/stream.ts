@@ -12,10 +12,18 @@ import {
   getStreamBatchMinSleepMs,
   getStreamMaxQueueDepth,
   getStreamMaxQueuedAgeSeconds,
+  getStreamMode,
   sanitizeHeliusUrl,
 } from "./config";
+import {
+  isBagsMint,
+  checkBagsMintViaApi,
+  getBagsMintCount,
+} from "./bags-admission";
 import { StreamDiagnostics } from "./diagnostics";
 import type { HeliusSignatureNotice, HeliusTransaction } from "./types";
+
+// ── Type classifiers ───────────────────────────────────────────────────────
 
 const SWAP_TYPES = new Set([
   "SWAP",
@@ -23,27 +31,29 @@ const SWAP_TYPES = new Set([
   "JUPITER_SWAP",
   "RAYDIUM_SWAP",
   "ORCA_SWAP",
-  // Meteora DBC bonding curve trades and DAMM v2 AMM trades
   "METEORA_SWAP",
-  // Liquidity events: initial DBC pool funding and post-graduation DAMM v2
-  // add/remove. Treated as SWAP (LIQUIDITY_LIVE path) because they indicate
-  // active trading infrastructure for a mint, not a new mint creation.
+  // Liquidity events: initial DBC pool funding and post-graduation DAMM v2.
+  // Treated as SWAP (LIQUIDITY_LIVE path) — they indicate active trading
+  // infrastructure for a mint, not new mint creation.
   "ADD_LIQUIDITY",
   "REMOVE_LIQUIDITY",
 ]);
+
 const MINT_TYPES = new Set([
   "CREATE_MINT",
   "TOKEN_MINT",
   "MINT_TO",
   "INITIALIZE_MINT",
-  // Meteora DBC pool initialization: this is the transaction that creates a
-  // new token and its bonding curve in one step. Treated as TOKEN_MINT so
-  // the engine fires NEW_MINT_SEEN for the new token.
+  // Meteora DBC pool initialization: creates a new token + bonding curve in
+  // one tx. Treated as TOKEN_MINT so the engine fires NEW_MINT_SEEN.
   "INITIALIZE_POOL",
   "CREATE_POOL",
 ]);
+
 const TRANSFER_TYPES = new Set(["TRANSFER", "SYSTEM_TRANSFER"]);
+
 const BASE_MINTS = new Set([BASE_SOL_MINT, BASE_USDC_MINT]);
+
 const FETCH_KEEP_KEYWORDS = [
   "swap",
   "initialize",
@@ -52,6 +62,7 @@ const FETCH_KEEP_KEYWORDS = [
   "route",
   "liquidity",
 ];
+
 const FETCH_NOISE_INSTRUCTION_KEYWORDS = [
   "instruction: transfer",
   "instruction: transferchecked",
@@ -60,6 +71,8 @@ const FETCH_NOISE_INSTRUCTION_KEYWORDS = [
   "instruction: close account",
   "instruction: memo",
 ];
+
+// ── Normalisation helpers ──────────────────────────────────────────────────
 
 function classifyType(
   tx: HeliusTransaction,
@@ -104,12 +117,10 @@ function extractTokenInfo(tx: HeliusTransaction): {
   return {};
 }
 
-// Fallback classifier for transactions where Helius returns no recognized type
-// (e.g. newly-supported programs like Meteora DBC that the enhanced parser has
-// not yet categorised). If the tx contains at least one non-base-mint token
-// transfer it is treated as SWAP, which routes it to the LIQUIDITY_LIVE path
-// in the engine. This is intentionally conservative: we only use it when
-// classifyType() returns null, so it cannot override a recognised type.
+// Fallback classifier for transactions where Helius returns no recognised type
+// (e.g. Meteora DBC that the enhanced parser has not yet categorised). If the
+// tx contains at least one non-base-mint token transfer it is treated as SWAP.
+// Only fires when classifyType() returns null.
 function classifyByTransferFallback(
   tx: HeliusTransaction,
 ): "SWAP" | null {
@@ -122,11 +133,6 @@ function classifyByTransferFallback(
 
 function normalize(tx: HeliusTransaction): RawEvent | null {
   const knownEventType = classifyType(tx);
-
-  // If the Helius parser returned a recognised type use it directly.
-  // Otherwise fall back to transfer-based classification so that transactions
-  // from newer DEX programs (Meteora DBC, etc.) are not silently dropped
-  // just because Helius has not assigned them a type string yet.
   const eventType = knownEventType ?? classifyByTransferFallback(tx);
   if (!eventType) return null;
 
@@ -151,9 +157,7 @@ function normalize(tx: HeliusTransaction): RawEvent | null {
 }
 
 function shouldSkipInsert(event: RawEvent, tx: HeliusTransaction): boolean {
-  if (event.eventType !== "SWAP") {
-    return false;
-  }
+  if (event.eventType !== "SWAP") return false;
 
   const tokenMints = (tx.tokenTransfers ?? [])
     .map((transfer) => transfer.mint)
@@ -161,6 +165,63 @@ function shouldSkipInsert(event: RawEvent, tx: HeliusTransaction): boolean {
 
   return tokenMints.length > 0 && tokenMints.every((mint) => BASE_MINTS.has(mint));
 }
+
+// ── Bags admission ─────────────────────────────────────────────────────────
+
+/**
+ * Check whether a token mint is admitted under the current stream mode.
+ *
+ * bags_only: mint must be in knownBagsMints (from Restream or REST poll).
+ *   If not in cache, performs an on-demand Bags Pools API call (≤5s timeout).
+ *   Returns reason string for logging.
+ *
+ * hybrid: same as bags_only, but if mint is unknown AND STREAM_ALLOW_GENERAL_SOLANA
+ *   is true, admit anyway (legacy path). No on-demand API call in hybrid.
+ *
+ * legacy: always admit.
+ *
+ * Returns { admitted: boolean; reason: string }.
+ */
+async function checkBagsAdmission(
+  mint: string,
+): Promise<{ admitted: boolean; reason: string }> {
+  const mode = getStreamMode();
+
+  if (mode === "legacy") {
+    return { admitted: true, reason: "legacy_mode" };
+  }
+
+  if (!mint || BASE_MINTS.has(mint)) {
+    // Base mint (SOL, USDC) or no mint. shouldSkipInsert handles the SOL-only
+    // swap case. For missing mint, drop in bags_only; allow in hybrid.
+    if (mode === "bags_only") {
+      return { admitted: false, reason: "no_token_mint" };
+    }
+    return { admitted: true, reason: "no_token_mint_hybrid_allow" };
+  }
+
+  // Fast path: already in knownBagsMints
+  if (isBagsMint(mint)) {
+    return { admitted: true, reason: "bags_pool_known" };
+  }
+
+  // bags_only: try on-demand API check before dropping
+  if (mode === "bags_only") {
+    const found = await checkBagsMintViaApi(mint);
+    if (found) {
+      return { admitted: true, reason: "on_demand_verified" };
+    }
+    return { admitted: false, reason: "not_bags_origin" };
+  }
+
+  // hybrid: no on-demand check, rely on knownBagsMints + allow-general flag
+  if (process.env.STREAM_ALLOW_GENERAL_SOLANA === "true") {
+    return { admitted: true, reason: "general_solana_allowed" };
+  }
+  return { admitted: false, reason: "not_bags_origin" };
+}
+
+// ── Module state ───────────────────────────────────────────────────────────
 
 class FetchBatchHttpError extends Error {
   constructor(
@@ -188,6 +249,8 @@ let isFetching = false;
 
 diagnostics.start();
 
+// ── Helpers ────────────────────────────────────────────────────────────────
+
 function hashBatch(signatures: readonly string[]): string {
   return crypto
     .createHash("sha256")
@@ -207,20 +270,10 @@ function classifyFetchError(error: unknown): {
       message: error.message,
     };
   }
-
   if (error instanceof Error) {
-    return {
-      errorClass: error.name || "Error",
-      httpStatus: null,
-      message: error.message,
-    };
+    return { errorClass: error.name || "Error", httpStatus: null, message: error.message };
   }
-
-  return {
-    errorClass: "unknown_error",
-    httpStatus: null,
-    message: String(error),
-  };
+  return { errorClass: "unknown_error", httpStatus: null, message: String(error) };
 }
 
 function rememberProcessedSignature(signature: string): void {
@@ -232,7 +285,6 @@ function rememberProcessedSignature(signature: string): void {
       processedSignatures.delete(next.value);
     }
   }
-
   processedSignatures.add(signature);
 }
 
@@ -276,6 +328,8 @@ function shouldDropBeforeFetch(notice: HeliusSignatureNotice): {
   return { drop: false, reason: "unknown_keep" };
 }
 
+// ── Public API ─────────────────────────────────────────────────────────────
+
 export async function processSignature(
   notice: HeliusSignatureNotice,
 ): Promise<void> {
@@ -296,9 +350,7 @@ export async function processSignature(
     return;
   }
 
-  // Bounded queue: shed new admissions when overloaded rather than growing
-  // an unbounded backlog. Do NOT mark the sig as processed here — if the
-  // queue drains before the next WS reconnect replay, the sig is re-admissible.
+  // Bounded queue: shed new admissions when overloaded.
   const maxQueueDepth = getStreamMaxQueueDepth();
   if (queue.length >= maxQueueDepth) {
     diagnostics.onSignatureDropped("queue_full");
@@ -319,6 +371,8 @@ export function stopStreamProcessing(): void {
   diagnostics.stop();
 }
 
+// ── Drain loop ─────────────────────────────────────────────────────────────
+
 async function processQueueLoop(): Promise<void> {
   if (isFetching || queue.length === 0) return;
   isFetching = true;
@@ -326,10 +380,6 @@ async function processQueueLoop(): Promise<void> {
   const maxQueuedAgeMs = getStreamMaxQueuedAgeSeconds() * 1000;
 
   while (queue.length > 0) {
-    // Age-based drain: pull a candidate set and discard any signatures that
-    // have waited too long. Spending Helius credits on 30+ second old sigs is
-    // pure waste — they will be flagged stale by engine/tg-bot anyway. This
-    // also rapidly clears an existing deep backlog on startup without fetching.
     const candidates = queue.splice(0, MAX_BATCH_SIZE);
     const batch: string[] = [];
 
@@ -354,10 +404,7 @@ async function processQueueLoop(): Promise<void> {
       batch.push(...candidates);
     }
 
-    // All candidates were stale — loop immediately, no HTTP fetch needed.
-    if (batch.length === 0) {
-      continue;
-    }
+    if (batch.length === 0) continue;
 
     const batchKey = hashBatch(batch);
     const retryCount = batchRetryCounts.get(batchKey) ?? 0;
@@ -400,11 +447,6 @@ async function processQueueLoop(): Promise<void> {
       );
     }
 
-    // Adaptive inter-batch pause: skip sleep entirely when the queue is still
-    // backed up (we need to drain fast). Apply a short courtesy pause only
-    // when we have caught up to avoid hammering Helius with back-to-back
-    // requests when idle. The old fixed 3000ms applied even at 700-item depth,
-    // capping drain at ~14 sigs/sec and causing the observed runaway backlog.
     if (queue.length > 0) {
       const isBehind = queue.length > MAX_BATCH_SIZE;
       if (!isBehind) {
@@ -418,6 +460,8 @@ async function processQueueLoop(): Promise<void> {
 
   isFetching = false;
 }
+
+// ── Batch HTTP fetch + Bags admission ─────────────────────────────────────
 
 async function fetchAndProcessBatch(
   signatures: string[],
@@ -455,33 +499,77 @@ async function fetchAndProcessBatch(
   const missingTxCount = Math.max(signatures.length - txCountReturned, 0);
 
   if (!txs || txs.length === 0) {
-    return {
-      txCountReturned,
-      missingTxCount,
-      fetchDurationMs,
-    };
+    return { txCountReturned, missingTxCount, fetchDurationMs };
   }
 
-  // Collect and record all insertable events, then fire all DB inserts in
-  // parallel. Serial awaits (the old approach) added O(n * db_latency) to
-  // every batch cycle — ~500ms per 50-tx batch at 10ms each — on top of the
-  // already-slow 3000ms inter-batch sleep. Promise.allSettled preserves
-  // individual failure isolation while eliminating serial insert stacking.
-  const insertTasks: Promise<void>[] = [];
+  // ── Step 1: Normalise all txs ──────────────────────────────────────────
 
+  interface Candidate {
+    event: RawEvent;
+    tx: HeliusTransaction;
+    usedFallback: boolean;
+  }
+
+  const candidates: Candidate[] = [];
   for (const tx of txs) {
     const event = normalize(tx);
     if (!event) continue;
     if (shouldSkipInsert(event, tx)) continue;
+    candidates.push({ event, tx, usedFallback: !classifyType(tx) });
+  }
 
-    // Emit a distinct log when the fallback classifier fired (tx.type was
-    // null or unrecognised). This makes it visible in production logs that
-    // a Meteora DBC or similar untyped tx was admitted via the fallback path,
-    // and shows what type string Helius eventually assigns so we can add it
-    // to the SWAP_TYPES / MINT_TYPES sets once the parser is updated.
+  if (candidates.length === 0) {
+    return { txCountReturned, missingTxCount, fetchDurationMs };
+  }
+
+  // ── Step 2: Bags admission gate (parallel across the batch) ───────────
+  //
+  // In bags_only mode: mints not in knownBagsMints trigger an on-demand
+  // API check before being admitted. On-demand checks are deduped by
+  // bags-admission.ts for concurrent callers.
+  //
+  // In legacy mode: all candidates pass through unchanged.
+
+  const admissionResults = await Promise.allSettled(
+    candidates.map(async (c) => {
+      const mint = c.event.tokenMint;
+      const mintForCheck = mint ?? "";
+      const { admitted, reason } = await checkBagsAdmission(mintForCheck);
+
+      if (admitted) {
+        console.log(
+          `[stream] bags_admission_accept reason=${reason} mint=${mint ?? "n/a"}`,
+        );
+        return c;
+      } else {
+        console.log(
+          `[stream] bags_admission_drop reason=${reason} mint=${mint ?? "n/a"} bags_known_count=${getBagsMintCount()}`,
+        );
+        return null;
+      }
+    }),
+  );
+
+  const admitted: Candidate[] = admissionResults
+    .filter(
+      (r): r is PromiseFulfilledResult<Candidate | null> =>
+        r.status === "fulfilled",
+    )
+    .map((r) => r.value)
+    .filter((v): v is Candidate => v !== null);
+
+  if (admitted.length === 0) {
+    return { txCountReturned, missingTxCount, fetchDurationMs };
+  }
+
+  // ── Step 3: Insert admitted events in parallel ─────────────────────────
+
+  const insertTasks: Promise<void>[] = [];
+
+  for (const { event, tx, usedFallback } of admitted) {
     const heliusType = tx.type ?? "null";
     const heliusSource = tx.source ?? "n/a";
-    const usedFallback = !classifyType(tx);
+
     if (usedFallback) {
       console.log(
         `[stream] type_fallback_admitted sig=${event.signature.slice(0, 12)}... helius_source=${heliusSource} helius_type=${heliusType} classified_as=${event.eventType} mint=${event.tokenMint ?? "n/a"}`,
@@ -499,18 +587,12 @@ async function fetchAndProcessBatch(
     insertTasks.push(insertRawEvent(event));
   }
 
-  if (insertTasks.length > 0) {
-    const results = await Promise.allSettled(insertTasks);
-    for (const result of results) {
-      if (result.status === "rejected") {
-        console.error("[stream] DB insert failed:", result.reason);
-      }
+  const results = await Promise.allSettled(insertTasks);
+  for (const result of results) {
+    if (result.status === "rejected") {
+      console.error("[stream] DB insert failed:", result.reason);
     }
   }
 
-  return {
-    txCountReturned,
-    missingTxCount,
-    fetchDurationMs,
-  };
+  return { txCountReturned, missingTxCount, fetchDurationMs };
 }
