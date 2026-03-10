@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import type { HeliusWsMessage } from "../types";
+import { getHeliusNetwork, getHeliusWsBaseUrl, getTargetPrograms } from "../config";
 
 const RECONNECT_DELAY_MS = 5_000;
 const MAX_RECONNECT_DELAY_MS = 60_000;
@@ -13,7 +14,6 @@ export class HeliusProvider {
   private stopped = false;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private targetPrograms: string[];
-
   private wsBaseUrl: string;
 
   constructor(
@@ -24,25 +24,9 @@ export class HeliusProvider {
       throw new Error("HELIUS_API_KEY is missing");
     }
 
-    const network = process.env.HELIUS_NETWORK || "mainnet";
-    if (network !== "mainnet" && network !== "devnet") {
-      throw new Error(
-        `Invalid HELIUS_NETWORK: ${network}. Must be mainnet or devnet.`,
-      );
-    }
-
-    const explicitWs = process.env.HELIUS_WS_URL;
-    let baseWs = explicitWs ? explicitWs : `wss://${network}.helius-rpc.com`;
-    // Remove trailing slash to prevent double slashes before query params
-    this.wsBaseUrl = baseWs.endsWith("/") ? baseWs.slice(0, -1) : baseWs;
-
-    this.targetPrograms = process.env.STREAM_TARGET_PROGRAMS
-      ? process.env.STREAM_TARGET_PROGRAMS.split(",")
-      : [
-          "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", // Raydium AMM v4
-          "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc", // Orca Whirlpool
-          "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", // Jupiter v6
-        ];
+    const network = getHeliusNetwork();
+    this.wsBaseUrl = getHeliusWsBaseUrl();
+    this.targetPrograms = getTargetPrograms();
 
     console.log(`[helius] network configured: ${network}`);
     console.log(
@@ -73,7 +57,7 @@ export class HeliusProvider {
       `${this.apiKey.slice(0, 4)}***${this.apiKey.slice(-4)}`,
     );
 
-    console.log(`[helius] connecting to ${maskedUrl} …`);
+    console.log(`[helius] connecting to ${maskedUrl} ...`);
     const ws = new WebSocket(wsUrl);
     this.ws = ws;
 
@@ -101,7 +85,7 @@ export class HeliusProvider {
       this.clearPing();
       if (this.stopped) return;
       console.warn(
-        `[helius] disconnected — reconnecting in ${this.reconnectDelay}ms…`,
+        `[helius] disconnected - reconnecting in ${this.reconnectDelay}ms...`,
       );
       setTimeout(() => this.connect(), this.reconnectDelay);
       this.reconnectDelay = Math.min(
@@ -116,7 +100,6 @@ export class HeliusProvider {
    * Free-tier safe (unlike transactionSubscribe).
    */
   private subscribe(ws: WebSocket): void {
-    // We must send separate subscription requests because "mentions" must be exactly one pubkey array in standard RPC.
     this.targetPrograms.forEach((programId, index) => {
       const payload = {
         jsonrpc: "2.0",
@@ -139,7 +122,6 @@ export class HeliusProvider {
   }
 
   private handleMessage(msg: HeliusWsMessage): void {
-    // Subscription confirmation
     if (msg.id !== undefined && msg.result !== undefined) {
       console.log(`[helius] subscribed, subscription id: ${msg.result}`);
       return;
