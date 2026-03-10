@@ -5,11 +5,13 @@ import {
   BASE_SOL_MINT,
   BASE_USDC_MINT,
   JUPITER_V6_PROGRAM_ID,
-  FETCH_INTERVAL_MS,
   MAX_BATCH_SIZE,
   MAX_PROCESSED_SIGNATURE_CACHE_SIZE,
   getHeliusHttpUrl,
   getStreamAllowJupiterProgram,
+  getStreamBatchMinSleepMs,
+  getStreamMaxQueueDepth,
+  getStreamMaxQueuedAgeSeconds,
   sanitizeHeliusUrl,
 } from "./config";
 import { StreamDiagnostics } from "./diagnostics";
@@ -260,6 +262,16 @@ export async function processSignature(
     return;
   }
 
+  // Bounded queue: shed new admissions when overloaded rather than growing
+  // an unbounded backlog. Do NOT mark the sig as processed here — if the
+  // queue drains before the next WS reconnect replay, the sig is re-admissible.
+  const maxQueueDepth = getStreamMaxQueueDepth();
+  if (queue.length >= maxQueueDepth) {
+    diagnostics.onSignatureDropped("queue_full");
+    diagnostics.onFetchSkipped(1);
+    return;
+  }
+
   rememberProcessedSignature(notice.signature);
   queue.push(notice.signature);
   diagnostics.onSignatureQueued(notice.signature);
@@ -277,8 +289,42 @@ async function processQueueLoop(): Promise<void> {
   if (isFetching || queue.length === 0) return;
   isFetching = true;
 
+  const maxQueuedAgeMs = getStreamMaxQueuedAgeSeconds() * 1000;
+
   while (queue.length > 0) {
-    const batch = queue.splice(0, MAX_BATCH_SIZE);
+    // Age-based drain: pull a candidate set and discard any signatures that
+    // have waited too long. Spending Helius credits on 30+ second old sigs is
+    // pure waste — they will be flagged stale by engine/tg-bot anyway. This
+    // also rapidly clears an existing deep backlog on startup without fetching.
+    const candidates = queue.splice(0, MAX_BATCH_SIZE);
+    const batch: string[] = [];
+
+    if (maxQueuedAgeMs > 0) {
+      let ageDropCount = 0;
+      for (const sig of candidates) {
+        if (diagnostics.isSignatureStale(sig, maxQueuedAgeMs)) {
+          diagnostics.onSignatureDropped("age_expired");
+          diagnostics.onFetchSkipped(1);
+          diagnostics.onBatchSettled([sig]);
+          ageDropCount++;
+        } else {
+          batch.push(sig);
+        }
+      }
+      if (ageDropCount > 0) {
+        console.warn(
+          `[stream] age_drop_purge count=${ageDropCount} max_queued_age_seconds=${getStreamMaxQueuedAgeSeconds()} remaining_queue=${queue.length}`,
+        );
+      }
+    } else {
+      batch.push(...candidates);
+    }
+
+    // All candidates were stale — loop immediately, no HTTP fetch needed.
+    if (batch.length === 0) {
+      continue;
+    }
+
     const batchKey = hashBatch(batch);
     const retryCount = batchRetryCounts.get(batchKey) ?? 0;
     const batchStartLog = diagnostics.buildBatchStartLog(batch, retryCount);
@@ -320,8 +366,19 @@ async function processQueueLoop(): Promise<void> {
       );
     }
 
+    // Adaptive inter-batch pause: skip sleep entirely when the queue is still
+    // backed up (we need to drain fast). Apply a short courtesy pause only
+    // when we have caught up to avoid hammering Helius with back-to-back
+    // requests when idle. The old fixed 3000ms applied even at 700-item depth,
+    // capping drain at ~14 sigs/sec and causing the observed runaway backlog.
     if (queue.length > 0) {
-      await new Promise((resolve) => setTimeout(resolve, FETCH_INTERVAL_MS));
+      const isBehind = queue.length > MAX_BATCH_SIZE;
+      if (!isBehind) {
+        const minSleepMs = getStreamBatchMinSleepMs();
+        if (minSleepMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, minSleepMs));
+        }
+      }
     }
   }
 
@@ -371,6 +428,13 @@ async function fetchAndProcessBatch(
     };
   }
 
+  // Collect and record all insertable events, then fire all DB inserts in
+  // parallel. Serial awaits (the old approach) added O(n * db_latency) to
+  // every batch cycle — ~500ms per 50-tx batch at 10ms each — on top of the
+  // already-slow 3000ms inter-batch sleep. Promise.allSettled preserves
+  // individual failure isolation while eliminating serial insert stacking.
+  const insertTasks: Promise<void>[] = [];
+
   for (const tx of txs) {
     const event = normalize(tx);
     if (!event) continue;
@@ -384,11 +448,15 @@ async function fetchAndProcessBatch(
 
     const insertAttemptTimeMs = Date.now();
     diagnostics.recordEventBeforeInsert(event, insertAttemptTimeMs);
+    insertTasks.push(insertRawEvent(event));
+  }
 
-    try {
-      await insertRawEvent(event);
-    } catch (error) {
-      console.error("[stream] DB insert failed:", error);
+  if (insertTasks.length > 0) {
+    const results = await Promise.allSettled(insertTasks);
+    for (const result of results) {
+      if (result.status === "rejected") {
+        console.error("[stream] DB insert failed:", result.reason);
+      }
     }
   }
 

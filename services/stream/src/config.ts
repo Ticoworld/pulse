@@ -11,7 +11,6 @@ const DEFAULT_TARGET_PROGRAMS = [
 ];
 
 export const MAX_BATCH_SIZE = 50;
-export const FETCH_INTERVAL_MS = 3_000;
 export const MAX_PROCESSED_SIGNATURE_CACHE_SIZE = 10_000;
 
 export const BASE_SOL_MINT = "So11111111111111111111111111111111111111112";
@@ -123,17 +122,44 @@ export function getStreamStableConnectionResetMs(): number {
   return STABLE_CONNECTION_RESET_MS;
 }
 
+// Maximum number of signatures held in the in-memory queue at once.
+// When the queue reaches this depth, new admissions are dropped with reason
+// "queue_full". This bounds memory and forces explicit shedding under load
+// rather than silently accumulating unbounded stale work.
+export function getStreamMaxQueueDepth(): number {
+  return parseNumberEnv("STREAM_MAX_QUEUE_DEPTH", 500);
+}
+
+// Signatures that have been waiting in the queue longer than this many seconds
+// are dropped without an HTTP fetch. At 70s queue age the events are already
+// too stale for the engine and tg-bot to act on; spending Helius credits on
+// them only keeps the queue deep. Default is 30s: short enough to purge a
+// runaway backlog quickly, long enough to survive brief Helius HTTP spikes.
+export function getStreamMaxQueuedAgeSeconds(): number {
+  return parseNumberEnv("STREAM_MAX_QUEUED_AGE_SECONDS", 30);
+}
+
+// Minimum sleep between successive HTTP fetch batches when the queue is at or
+// below MAX_BATCH_SIZE (i.e. "caught up"). Set to 0 to disable entirely.
+// When the queue is deeper than MAX_BATCH_SIZE the drain loop skips this sleep
+// and processes the next batch immediately. Replaces the old fixed 3000 ms
+// inter-batch sleep which was the primary self-inflicted throughput bottleneck.
+export function getStreamBatchMinSleepMs(): number {
+  return parseNumberEnv("STREAM_BATCH_MIN_SLEEP_MS", 100);
+}
+
 export interface StreamStartupConfig {
   targetPrograms: string[];
   batchSize: number;
-  batchSleepMs: number;
+  batchMinSleepMs: number;
+  maxQueueDepth: number;
+  maxQueuedAgeSeconds: number;
   replayMode: string;
   backfillEnabled: boolean;
   restartResumeState: string;
   heliusWsBaseUrl: string;
   heliusHttpUrl: string;
   dedupeCacheSize: number;
-  maxQueueDepth: string;
   debugMetrics: boolean;
   metricsIntervalMs: number;
   metricsEveryNSignatures: number;
@@ -147,14 +173,15 @@ export function getStreamStartupConfig(apiKey: string): StreamStartupConfig {
   return {
     targetPrograms: getTargetPrograms(),
     batchSize: MAX_BATCH_SIZE,
-    batchSleepMs: FETCH_INTERVAL_MS,
+    batchMinSleepMs: getStreamBatchMinSleepMs(),
+    maxQueueDepth: getStreamMaxQueueDepth(),
+    maxQueuedAgeSeconds: getStreamMaxQueuedAgeSeconds(),
     replayMode: "live_logs_subscribe_only",
     backfillEnabled: false,
     restartResumeState: "in_memory_only",
     heliusWsBaseUrl: sanitizeHeliusUrl(getHeliusWsBaseUrl(), apiKey),
     heliusHttpUrl: sanitizeHeliusUrl(getHeliusHttpUrl(apiKey), apiKey),
     dedupeCacheSize: MAX_PROCESSED_SIGNATURE_CACHE_SIZE,
-    maxQueueDepth: "unbounded_in_memory",
     debugMetrics: getStreamDebugMetrics(),
     metricsIntervalMs: getStreamMetricsIntervalMs(),
     metricsEveryNSignatures: getStreamMetricsEveryNSignatures(),

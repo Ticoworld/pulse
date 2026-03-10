@@ -158,6 +158,15 @@ export class StreamDiagnostics {
     }
   }
 
+  // Returns true if the signature has been in the queue longer than maxAgeMs.
+  // Returns false if the signature is unknown (not tracked), so unknown sigs
+  // are never dropped by this check.
+  isSignatureStale(signature: string, maxAgeMs: number): boolean {
+    const queuedAt = this.signatureFirstQueuedAt.get(signature);
+    if (queuedAt == null) return false;
+    return Date.now() - queuedAt > maxAgeMs;
+  }
+
   buildBatchStartLog(batch: readonly string[], retryCount: number): BatchStartLog {
     const batchStartTimeMs = Date.now();
     const queueWithBatch = [...batch, ...this.getQueueSnapshot()];
@@ -220,16 +229,19 @@ export class StreamDiagnostics {
         ? event.timestamp
         : Math.max(this.newestChainTimeSeenMs, event.timestamp);
 
-    if (
-      this.debugMetrics ||
-      chainToStreamInsertSeconds >= this.staleEventWarnSeconds
-    ) {
+    if (chainToStreamInsertSeconds >= this.staleEventWarnSeconds) {
       console.warn(
         `[stream] stale_event_ingested event_type=${event.eventType} mint=${mint} signature=${event.signature} chain_time=${new Date(
           event.timestamp,
         ).toISOString()} stream_insert_attempt_time=${new Date(
           insertAttemptTimeMs,
         ).toISOString()} chain_to_stream_insert_seconds=${toFixed(
+          chainToStreamInsertSeconds,
+        )}`,
+      );
+    } else if (this.debugMetrics) {
+      console.log(
+        `[stream] debug_event_record event_type=${event.eventType} mint=${mint} signature=${event.signature} chain_to_stream_insert_seconds=${toFixed(
           chainToStreamInsertSeconds,
         )}`,
       );
