@@ -6,6 +6,7 @@ import {
   listWatchlistWallets,
   listUnsentSignals,
   markSignalSent,
+  markSignalTelegramSkipped,
   getWalletProfile,
   getActorByWallet,
   listUnnotifiedExecutionOrders,
@@ -52,6 +53,11 @@ import {
   formatTopCandidatesDigest,
   formatUnknownSignal,
 } from "./formatters";
+import {
+  evaluateSignalFreshness,
+  isFreshnessProtectedSignalType,
+  type SignalFreshnessResult,
+} from "./signalFreshness";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) {
@@ -118,6 +124,41 @@ function readStringField(payload: Record<string, unknown>, key: string): string 
     return value;
   }
   return null;
+}
+
+function toIso(value: Date | string | null | undefined): string {
+  if (!value) return "unavailable";
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(parsed.getTime()) ? "unavailable" : parsed.toISOString();
+}
+
+function secondsBetween(
+  later: Date | string | null | undefined,
+  earlier: Date | string | null | undefined,
+): string {
+  if (!later || !earlier) return "unavailable";
+  const laterDate = later instanceof Date ? later : new Date(later);
+  const earlierDate = earlier instanceof Date ? earlier : new Date(earlier);
+  if (Number.isNaN(laterDate.getTime()) || Number.isNaN(earlierDate.getTime())) {
+    return "unavailable";
+  }
+  return ((laterDate.getTime() - earlierDate.getTime()) / 1000).toFixed(3);
+}
+
+function logFreshnessDecision(
+  label: string,
+  signal: Signal,
+  freshness: SignalFreshnessResult,
+): void {
+  console.warn(
+    `[tg-bot] ${label} type=${signal.type} mint=${signal.token_mint ?? "n/a"} signature=${signal.signature} chain_time=${toIso(freshness.chainTime)} current_time=${toIso(freshness.currentTime)} age_seconds=${freshness.ageSeconds == null ? "unproven" : freshness.ageSeconds.toFixed(3)}`,
+  );
+}
+
+function logSignalDeliveryTrace(signal: Signal, telegramSentAt: Date): void {
+  console.log(
+    `[tg-bot] signal_delivery_trace type=${signal.type} mint=${signal.token_mint ?? "n/a"} signature=${signal.signature} chain_time=${toIso(signal.chain_time)} raw_event_created_at=${toIso(signal.raw_event_created_at)} engine_processed_at=${toIso(signal.engine_processed_at)} signal_created_at=${toIso(signal.created_at)} telegram_sent_at=${telegramSentAt.toISOString()} chain_to_raw_seconds=${secondsBetween(signal.raw_event_created_at, signal.chain_time)} raw_to_engine_seconds=${secondsBetween(signal.engine_processed_at, signal.raw_event_created_at)} engine_to_signal_seconds=${secondsBetween(signal.created_at, signal.engine_processed_at)} signal_to_telegram_seconds=${secondsBetween(telegramSentAt, signal.created_at)} chain_to_telegram_seconds=${secondsBetween(telegramSentAt, signal.chain_time)}`,
+  );
 }
 
 async function formatSignalAlert(signal: Signal): Promise<FormattedAlert> {
@@ -732,6 +773,25 @@ async function pollSignals(): Promise<void> {
   try {
     const signals = await listUnsentSignals(10);
     for (const signal of signals) {
+      if (isFreshnessProtectedSignalType(signal.type)) {
+        const freshness = evaluateSignalFreshness(signal);
+
+        if (freshness.decision === "unproven") {
+          logFreshnessDecision("freshness_unproven", signal, freshness);
+        } else if (freshness.decision === "send_with_warning") {
+          logFreshnessDecision("freshness_warning", signal, freshness);
+        } else if (freshness.decision === "skip_stale") {
+          logFreshnessDecision("stale_signal_skipped", signal, freshness);
+          await markSignalTelegramSkipped(signal.id, {
+            reason: "chain_age_over_120s",
+            ageSeconds: freshness.ageSeconds ?? 0,
+            chainTime: freshness.chainTime,
+            currentTime: freshness.currentTime,
+          });
+          continue;
+        }
+      }
+
       const alert = await formatSignalAlert(signal);
       const ownerSent = await sendOwnerAlert({
         ...alert,
@@ -739,7 +799,9 @@ async function pollSignals(): Promise<void> {
       });
 
       if (ownerSent) {
-        await markSignalSent(signal.id);
+        const telegramSentAt = new Date();
+        await markSignalSent(signal.id, telegramSentAt);
+        logSignalDeliveryTrace(signal, telegramSentAt);
         console.log(`[tg-bot] sent alert for signal ${signal.id}`);
       }
 

@@ -28,6 +28,24 @@ interface RawEventRow {
   wallet_address: string | null;
   token_mint: string | null;
   amount: string | null;
+  ts: Date;
+  raw_event_created_at: Date;
+}
+
+function secondsBetween(later: Date, earlier: Date): number {
+  return Number(((later.getTime() - earlier.getTime()) / 1000).toFixed(3));
+}
+
+function logSignalTrace(
+  type: string,
+  row: RawEventRow,
+  engineProcessedAt: Date,
+): void {
+  const chainTime = new Date(row.ts);
+  const rawEventCreatedAt = new Date(row.raw_event_created_at);
+  console.log(
+    `[engine] signal_trace type=${type} mint=${row.token_mint ?? "n/a"} signature=${row.signature} chain_time=${chainTime.toISOString()} raw_event_created_at=${rawEventCreatedAt.toISOString()} engine_processed_at=${engineProcessedAt.toISOString()} chain_to_raw_seconds=${secondsBetween(rawEventCreatedAt, chainTime)} raw_to_engine_seconds=${secondsBetween(engineProcessedAt, rawEventCreatedAt)} chain_to_engine_seconds=${secondsBetween(engineProcessedAt, chainTime)}`,
+  );
 }
 
 /**
@@ -68,7 +86,8 @@ export async function runEngine(): Promise<() => void> {
   async function tick(): Promise<void> {
     try {
       const result = await query<RawEventRow>(
-        `SELECT seq, event_type, signature, slot, wallet_address, token_mint, amount
+        `SELECT seq, event_type, signature, slot, wallet_address, token_mint, amount,
+                ts, created_at AS raw_event_created_at
          FROM raw_events
          WHERE event_type IN ('SWAP', 'TOKEN_MINT')
            AND seq > $1
@@ -110,10 +129,12 @@ export async function runEngine(): Promise<() => void> {
       // 1. Process NEW_MINT_SEEN
       const candidateExists = await getLaunchCandidateByMint(row.token_mint);
       if (!candidateExists) {
+        const chainTime = new Date(row.ts);
+        const engineProcessedAt = new Date();
         await upsertLaunchCandidateFirstSeen({
           mint: row.token_mint,
           firstSeenSeq: row.seq,
-          firstSeenAt: new Date(),
+          firstSeenAt: chainTime,
           firstSeenSignature: row.signature,
         });
 
@@ -128,7 +149,13 @@ export async function runEngine(): Promise<() => void> {
             slot: row.slot,
             seq: row.seq,
           },
+          trace: {
+            chainTime,
+            rawEventCreatedAt: row.raw_event_created_at,
+            engineProcessedAt,
+          },
         });
+        logSignalTrace("NEW_MINT_SEEN", row, engineProcessedAt);
         console.log(
           `[engine] 🌟 NEW_MINT_SEEN | mint: ${row.token_mint} | sig: ${row.signature.slice(0, 12)}…`,
         );
@@ -193,11 +220,13 @@ export async function runEngine(): Promise<() => void> {
       if (row.token_mint && !isBaseMint) {
         const candidate = await getLaunchCandidateByMint(row.token_mint);
         if (candidate && !candidate.liquidity_live_seq) {
+          const chainTime = new Date(row.ts);
+          const engineProcessedAt = new Date();
           await markLaunchCandidateLiquidityLive(
             row.token_mint,
             row.seq,
             row.signature,
-            new Date(),
+            chainTime,
           );
 
           // 2.1 Dev Tracking: Liquidity Live Count
@@ -232,7 +261,13 @@ export async function runEngine(): Promise<() => void> {
               seq: row.seq,
               dev: devPayload,
             },
+            trace: {
+              chainTime,
+              rawEventCreatedAt: row.raw_event_created_at,
+              engineProcessedAt,
+            },
           });
+          logSignalTrace("LIQUIDITY_LIVE", row, engineProcessedAt);
           console.log(
             `[engine] 💧 LIQUIDITY_LIVE | mint: ${row.token_mint} | sig: ${row.signature.slice(0, 12)}…`,
           );
@@ -249,6 +284,7 @@ export async function runEngine(): Promise<() => void> {
 
       if (isBaseMint) return;
 
+      const engineProcessedAt = new Date();
       await insertSignal({
         type: "ALPHA_WALLET_BUY",
         walletAddress: row.wallet_address,
@@ -263,7 +299,13 @@ export async function runEngine(): Promise<() => void> {
           slot: row.slot,
           seq: row.seq,
         },
+        trace: {
+          chainTime: row.ts,
+          rawEventCreatedAt: row.raw_event_created_at,
+          engineProcessedAt,
+        },
       });
+      logSignalTrace("ALPHA_WALLET_BUY", row, engineProcessedAt);
 
       console.log(
         `[engine] 🚨 ALPHA_WALLET_BUY | wallet: ${row.wallet_address}${wallet.label ? ` (${wallet.label})` : ""} | mint: ${row.token_mint ?? "n/a"} | sig: ${row.signature.slice(0, 12)}…`,

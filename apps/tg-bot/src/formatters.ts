@@ -8,6 +8,7 @@ export interface SignalLike {
   slot: number;
   payload: Record<string, unknown>;
   created_at: Date | string;
+  chain_time?: Date | string | null;
 }
 
 export interface WalletProfileSummary {
@@ -63,6 +64,30 @@ function toText(value: unknown): string | null {
   return null;
 }
 
+function parseDate(value: Date | string | null | undefined): Date | null {
+  if (!value) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function primarySignalTime(
+  signal: SignalLike,
+): { label: "Chain Time" | "Observed At"; value: Date } {
+  const payload = asRecord(signal.payload);
+  const trace = asRecord(payload.trace);
+  const chainTime =
+    parseDate(signal.chain_time) ?? parseDate(asString(trace.chain_time));
+
+  if (chainTime) {
+    return { label: "Chain Time", value: chainTime };
+  }
+
+  return {
+    label: "Observed At",
+    value: parseDate(signal.created_at) ?? new Date(signal.created_at),
+  };
+}
+
 function actorPreview(actorId: string): string {
   return actorId.split("-")[0];
 }
@@ -99,11 +124,12 @@ export function formatAlphaWalletBuySignal(
 }
 
 export function formatNewMintSignal(signal: SignalLike): FormattedAlert {
+  const time = primarySignalTime(signal);
   const lines = [
     "NEW MINT SEEN",
     `Mint: ${signal.token_mint ?? "unknown"}`,
     `Slot: ${signal.slot}`,
-    `Time: ${new Date(signal.created_at).toLocaleString()}`,
+    `${time.label}: ${time.value.toLocaleString()}`,
     `Tx: https://solscan.io/tx/${signal.signature}`,
   ];
 
@@ -113,6 +139,7 @@ export function formatNewMintSignal(signal: SignalLike): FormattedAlert {
 export function formatLiquidityLiveSignal(signal: SignalLike): FormattedAlert {
   const payload = asRecord(signal.payload);
   const dev = asRecord(payload.dev);
+  const time = primarySignalTime(signal);
   const lines = [
     "LIQUIDITY LIVE",
     `Mint: ${signal.token_mint ?? "unknown"}`,
@@ -130,7 +157,7 @@ export function formatLiquidityLiveSignal(signal: SignalLike): FormattedAlert {
 
   lines.push(
     `Slot: ${signal.slot}`,
-    `Time: ${new Date(signal.created_at).toLocaleString()}`,
+    `${time.label}: ${time.value.toLocaleString()}`,
     `Tx: https://solscan.io/tx/${signal.signature}`,
   );
 
