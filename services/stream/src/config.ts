@@ -5,9 +5,21 @@ export const ORCA_WHIRLPOOL_PROGRAM_ID =
 export const JUPITER_V6_PROGRAM_ID =
   "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
 
+// Meteora DBC (Dynamic Bonding Curve): handles Bags token creation and bonding
+// curve lifecycle. Source: https://docs.bags.fm/principles/program-ids
+export const METEORA_DBC_PROGRAM_ID =
+  "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN";
+
+// Meteora DAMM v2: post-graduation AMM after DBC bonding curve completes.
+// Higher volume than DBC; opt-in via STREAM_ALLOW_METEORA_DAMM_V2=true.
+// Source: https://docs.bags.fm/principles/program-ids
+export const METEORA_DAMM_V2_PROGRAM_ID =
+  "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG";
+
 const DEFAULT_TARGET_PROGRAMS = [
   RAYDIUM_AMM_V4_PROGRAM_ID, // Raydium AMM v4
   ORCA_WHIRLPOOL_PROGRAM_ID, // Orca Whirlpool
+  METEORA_DBC_PROGRAM_ID,    // Meteora DBC — Bags token launches and bonding curve trades
 ];
 
 export const MAX_BATCH_SIZE = 50;
@@ -47,21 +59,31 @@ export function getHeliusNetwork(): "mainnet" | "devnet" {
 
 export function getTargetPrograms(): string[] {
   const configured = process.env.STREAM_TARGET_PROGRAMS;
-  const programs = configured
+  let programs: string[] = configured
     ? configured
         .split(",")
         .map((value) => value.trim())
         .filter(Boolean)
     : [...DEFAULT_TARGET_PROGRAMS];
 
-  if (getStreamAllowJupiterProgram()) {
-    return programs.length > 0 ? programs : [...DEFAULT_TARGET_PROGRAMS];
+  if (!getStreamAllowJupiterProgram()) {
+    programs = programs.filter((id) => id !== JUPITER_V6_PROGRAM_ID);
   }
 
-  const filtered = programs.filter(
-    (programId) => programId !== JUPITER_V6_PROGRAM_ID,
-  );
-  return filtered.length > 0 ? filtered : [...DEFAULT_TARGET_PROGRAMS];
+  if (!getStreamAllowMeteoraDbc()) {
+    programs = programs.filter((id) => id !== METEORA_DBC_PROGRAM_ID);
+  }
+
+  // DAMM v2 is off by default (higher volume, post-graduation tokens).
+  // Enable with STREAM_ALLOW_METEORA_DAMM_V2=true.
+  if (
+    getStreamAllowMeteoraDammV2() &&
+    !programs.includes(METEORA_DAMM_V2_PROGRAM_ID)
+  ) {
+    programs.push(METEORA_DAMM_V2_PROGRAM_ID);
+  }
+
+  return programs.length > 0 ? programs : [...DEFAULT_TARGET_PROGRAMS];
 }
 
 export function getHeliusWsBaseUrl(): string {
@@ -108,6 +130,21 @@ export function getStreamStaleEventWarnSeconds(): number {
 
 export function getStreamAllowJupiterProgram(): boolean {
   return parseBooleanEnv("STREAM_ALLOW_JUPITER_PROGRAM", false);
+}
+
+// Meteora DBC is enabled by default because it is the primary program for
+// Bags token launches. Disable with STREAM_ALLOW_METEORA_DBC=false if the
+// DBC subscription causes unexpected volume or 429s.
+export function getStreamAllowMeteoraDbc(): boolean {
+  return parseBooleanEnv("STREAM_ALLOW_METEORA_DBC", true);
+}
+
+// Meteora DAMM v2 handles post-graduation AMM trading. It is disabled by
+// default because it is a general-purpose DEX (not Bags-exclusive) and will
+// add significant volume. Enable with STREAM_ALLOW_METEORA_DAMM_V2=true once
+// DBC coverage is confirmed healthy and throughput headroom is verified.
+export function getStreamAllowMeteoraDammV2(): boolean {
+  return parseBooleanEnv("STREAM_ALLOW_METEORA_DAMM_V2", false);
 }
 
 export function getStreamHelius429Threshold(): number {
@@ -165,6 +202,8 @@ export interface StreamStartupConfig {
   metricsEveryNSignatures: number;
   staleEventWarnSeconds: number;
   allowJupiterProgram: boolean;
+  allowMeteoraDbc: boolean;
+  allowMeteoraDammV2: boolean;
   helius429Threshold: number;
   helius429CooldownMs: number;
 }
@@ -187,6 +226,8 @@ export function getStreamStartupConfig(apiKey: string): StreamStartupConfig {
     metricsEveryNSignatures: getStreamMetricsEveryNSignatures(),
     staleEventWarnSeconds: getStreamStaleEventWarnSeconds(),
     allowJupiterProgram: getStreamAllowJupiterProgram(),
+    allowMeteoraDbc: getStreamAllowMeteoraDbc(),
+    allowMeteoraDammV2: getStreamAllowMeteoraDammV2(),
     helius429Threshold: getStreamHelius429Threshold(),
     helius429CooldownMs: getStreamHelius429CooldownMs(),
   };

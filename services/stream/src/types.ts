@@ -14,7 +14,8 @@ export interface HeliusTransaction {
   signature: string;
   slot: number;
   timestamp: number; // unix seconds
-  type?: string; // Helius transaction type string
+  type?: string;   // Helius transaction type string (e.g. "SWAP", "TOKEN_MINT")
+  source?: string; // Helius source label (e.g. "METEORA_DBC", "RAYDIUM_AMM")
   feePayer?: string;
   tokenTransfers?: Array<{
     mint?: string;

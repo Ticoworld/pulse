@@ -23,12 +23,24 @@ const SWAP_TYPES = new Set([
   "JUPITER_SWAP",
   "RAYDIUM_SWAP",
   "ORCA_SWAP",
+  // Meteora DBC bonding curve trades and DAMM v2 AMM trades
+  "METEORA_SWAP",
+  // Liquidity events: initial DBC pool funding and post-graduation DAMM v2
+  // add/remove. Treated as SWAP (LIQUIDITY_LIVE path) because they indicate
+  // active trading infrastructure for a mint, not a new mint creation.
+  "ADD_LIQUIDITY",
+  "REMOVE_LIQUIDITY",
 ]);
 const MINT_TYPES = new Set([
   "CREATE_MINT",
   "TOKEN_MINT",
   "MINT_TO",
   "INITIALIZE_MINT",
+  // Meteora DBC pool initialization: this is the transaction that creates a
+  // new token and its bonding curve in one step. Treated as TOKEN_MINT so
+  // the engine fires NEW_MINT_SEEN for the new token.
+  "INITIALIZE_POOL",
+  "CREATE_POOL",
 ]);
 const TRANSFER_TYPES = new Set(["TRANSFER", "SYSTEM_TRANSFER"]);
 const BASE_MINTS = new Set([BASE_SOL_MINT, BASE_USDC_MINT]);
@@ -92,8 +104,30 @@ function extractTokenInfo(tx: HeliusTransaction): {
   return {};
 }
 
+// Fallback classifier for transactions where Helius returns no recognized type
+// (e.g. newly-supported programs like Meteora DBC that the enhanced parser has
+// not yet categorised). If the tx contains at least one non-base-mint token
+// transfer it is treated as SWAP, which routes it to the LIQUIDITY_LIVE path
+// in the engine. This is intentionally conservative: we only use it when
+// classifyType() returns null, so it cannot override a recognised type.
+function classifyByTransferFallback(
+  tx: HeliusTransaction,
+): "SWAP" | null {
+  const transfers = tx.tokenTransfers ?? [];
+  const hasNonBaseMint = transfers.some(
+    (t) => t.mint != null && !BASE_MINTS.has(t.mint),
+  );
+  return hasNonBaseMint ? "SWAP" : null;
+}
+
 function normalize(tx: HeliusTransaction): RawEvent | null {
-  const eventType = classifyType(tx);
+  const knownEventType = classifyType(tx);
+
+  // If the Helius parser returned a recognised type use it directly.
+  // Otherwise fall back to transfer-based classification so that transactions
+  // from newer DEX programs (Meteora DBC, etc.) are not silently dropped
+  // just because Helius has not assigned them a type string yet.
+  const eventType = knownEventType ?? classifyByTransferFallback(tx);
   if (!eventType) return null;
 
   const { tokenMint, amount, walletAddress } = extractTokenInfo(tx);
@@ -440,10 +474,24 @@ async function fetchAndProcessBatch(
     if (!event) continue;
     if (shouldSkipInsert(event, tx)) continue;
 
+    // Emit a distinct log when the fallback classifier fired (tx.type was
+    // null or unrecognised). This makes it visible in production logs that
+    // a Meteora DBC or similar untyped tx was admitted via the fallback path,
+    // and shows what type string Helius eventually assigns so we can add it
+    // to the SWAP_TYPES / MINT_TYPES sets once the parser is updated.
+    const heliusType = tx.type ?? "null";
+    const heliusSource = tx.source ?? "n/a";
+    const usedFallback = !classifyType(tx);
+    if (usedFallback) {
+      console.log(
+        `[stream] type_fallback_admitted sig=${event.signature.slice(0, 12)}... helius_source=${heliusSource} helius_type=${heliusType} classified_as=${event.eventType} mint=${event.tokenMint ?? "n/a"}`,
+      );
+    }
+
     console.log(
       `[stream] ${event.eventType} | sig: ${event.signature.slice(0, 12)}... | mint: ${
         event.tokenMint ?? "n/a"
-      } | wallet: ${event.walletAddress?.slice(0, 6) ?? "n/a"}...`,
+      } | wallet: ${event.walletAddress?.slice(0, 6) ?? "n/a"}... | hs=${heliusSource} | ht=${heliusType}`,
     );
 
     const insertAttemptTimeMs = Date.now();
