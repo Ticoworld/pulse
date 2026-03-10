@@ -1,20 +1,48 @@
 import WebSocket from "ws";
-import type { HeliusWsMessage } from "../types";
-import { getHeliusNetwork, getHeliusWsBaseUrl, getTargetPrograms } from "../config";
+import type { HeliusSignatureNotice, HeliusWsMessage } from "../types";
+import {
+  getHeliusNetwork,
+  getHeliusWsBaseUrl,
+  getStreamHelius429CooldownMs,
+  getStreamHelius429Threshold,
+  getStreamStableConnectionResetMs,
+  getTargetPrograms,
+} from "../config";
 
 const RECONNECT_DELAY_MS = 5_000;
 const MAX_RECONNECT_DELAY_MS = 60_000;
 const PING_INTERVAL_MS = 30_000;
 
-type EventHandler = (signature: string) => void;
+type EventHandler = (notice: HeliusSignatureNotice) => void;
+
+function is429Like(message: string | undefined): boolean {
+  if (!message) return false;
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("429") ||
+    normalized.includes("too many requests") ||
+    normalized.includes("credit") ||
+    normalized.includes("rate limit")
+  );
+}
 
 export class HeliusProvider {
   private ws: WebSocket | null = null;
   private reconnectDelay = RECONNECT_DELAY_MS;
   private stopped = false;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
-  private targetPrograms: string[];
-  private wsBaseUrl: string;
+  private readonly targetPrograms: string[];
+  private readonly wsBaseUrl: string;
+  private readonly requestIdToProgram = new Map<number, string>();
+  private readonly subscriptionIdToProgram = new Map<number, string>();
+  private readonly ws429Threshold = getStreamHelius429Threshold();
+  private readonly ws429CooldownMs = getStreamHelius429CooldownMs();
+  private readonly stableConnectionResetMs = getStreamStableConnectionResetMs();
+
+  private consecutive429s = 0;
+  private circuitOpenUntilMs = 0;
+  private connectedAtMs: number | null = null;
+  private connectionSaw429 = false;
 
   constructor(
     private readonly apiKey: string,
@@ -51,6 +79,19 @@ export class HeliusProvider {
   private connect(): void {
     if (this.stopped) return;
 
+    const blockedMs = this.circuitOpenUntilMs - Date.now();
+    if (blockedMs > 0) {
+      console.warn(
+        `[helius] circuit_open reconnect_blocked_ms=${blockedMs} circuit_open_until=${new Date(
+          this.circuitOpenUntilMs,
+        ).toISOString()} consecutive_429s=${this.consecutive429s}`,
+      );
+      setTimeout(() => this.connect(), blockedMs);
+      return;
+    }
+
+    this.connectionSaw429 = false;
+
     const wsUrl = this.url();
     const maskedUrl = wsUrl.replace(
       this.apiKey,
@@ -63,6 +104,7 @@ export class HeliusProvider {
 
     ws.on("open", () => {
       console.log("[helius] connected");
+      this.connectedAtMs = Date.now();
       this.reconnectDelay = RECONNECT_DELAY_MS;
       this.subscribe(ws);
       this.startPing(ws);
@@ -78,32 +120,60 @@ export class HeliusProvider {
     });
 
     ws.on("error", (err) => {
+      if (is429Like(err.message)) {
+        this.note429("ws_error", err.message);
+        return;
+      }
       console.error("[helius] WebSocket error:", err.message);
     });
 
-    ws.on("close", () => {
+    ws.on("close", (code, reasonBuffer) => {
       this.clearPing();
+
+      const reason = reasonBuffer.toString();
+      const lifetimeMs = this.connectedAtMs == null ? 0 : Date.now() - this.connectedAtMs;
+      this.connectedAtMs = null;
+
+      if (!this.connectionSaw429 && is429Like(reason)) {
+        this.note429("ws_close", reason || `close_code_${code}`);
+      } else if (
+        !this.connectionSaw429 &&
+        lifetimeMs >= this.stableConnectionResetMs &&
+        this.consecutive429s > 0
+      ) {
+        this.consecutive429s = 0;
+      }
+
       if (this.stopped) return;
+
+      const blockedMs = Math.max(this.circuitOpenUntilMs - Date.now(), 0);
+      const reconnectDelay = blockedMs > 0 ? blockedMs : this.reconnectDelay;
+
       console.warn(
-        `[helius] disconnected - reconnecting in ${this.reconnectDelay}ms...`,
+        `[helius] disconnected - reconnecting in ${reconnectDelay}ms...`,
       );
-      setTimeout(() => this.connect(), this.reconnectDelay);
-      this.reconnectDelay = Math.min(
-        this.reconnectDelay * 2,
-        MAX_RECONNECT_DELAY_MS,
-      );
+      setTimeout(() => this.connect(), reconnectDelay);
+
+      if (blockedMs === 0) {
+        this.reconnectDelay = Math.min(
+          this.reconnectDelay * 2,
+          MAX_RECONNECT_DELAY_MS,
+        );
+      }
     });
   }
 
-  /**
-   * Subscribe to log notifications filtered to our target programs.
-   * Free-tier safe (unlike transactionSubscribe).
-   */
   private subscribe(ws: WebSocket): void {
+    this.requestIdToProgram.clear();
+    this.subscriptionIdToProgram.clear();
+
     this.targetPrograms.forEach((programId, index) => {
+      const requestId = index + 1;
+      this.requestIdToProgram.set(requestId, programId);
+
       const payload = {
         jsonrpc: "2.0",
-        id: index + 1,
+        id: requestId,
         method: "logsSubscribe",
         params: [
           {
@@ -116,22 +186,70 @@ export class HeliusProvider {
       };
       ws.send(JSON.stringify(payload));
     });
+
     console.log(
       `[helius] logsSubscribe requests sent for ${this.targetPrograms.length} programs`,
     );
   }
 
   private handleMessage(msg: HeliusWsMessage): void {
+    if (msg.error) {
+      if (is429Like(msg.error.message)) {
+        this.note429("rpc_message", msg.error.message);
+        this.ws?.close();
+        return;
+      }
+
+      console.error(
+        `[helius] RPC error code=${msg.error.code} message=${msg.error.message}`,
+      );
+      return;
+    }
+
     if (msg.id !== undefined && msg.result !== undefined) {
-      console.log(`[helius] subscribed, subscription id: ${msg.result}`);
+      const programId = this.requestIdToProgram.get(msg.id);
+      if (programId) {
+        this.subscriptionIdToProgram.set(msg.result, programId);
+      }
+      console.log(
+        `[helius] subscribed, subscription id: ${msg.result} program=${programId ?? "unknown"}`,
+      );
       return;
     }
 
     if (msg.method === "logsNotification" && msg.params?.result) {
       const value = msg.params.result.value;
       if (value && value.signature && !value.err) {
-        this.onEvent(value.signature);
+        this.onEvent({
+          signature: value.signature,
+          slot: msg.params.result.context.slot,
+          logs: value.logs ?? [],
+          programId:
+            msg.params.subscription == null
+              ? undefined
+              : this.subscriptionIdToProgram.get(msg.params.subscription),
+        });
       }
+    }
+  }
+
+  private note429(source: string, details: string): void {
+    this.connectionSaw429 = true;
+    this.consecutive429s += 1;
+
+    console.warn(
+      `[helius] ws_429_detected source=${source} consecutive_429s=${this.consecutive429s} details=${JSON.stringify(
+        details,
+      )}`,
+    );
+
+    if (this.consecutive429s >= this.ws429Threshold) {
+      this.circuitOpenUntilMs = Date.now() + this.ws429CooldownMs;
+      console.error(
+        `[helius] ws_429_circuit_open cooldown_ms=${this.ws429CooldownMs} circuit_open_until=${new Date(
+          this.circuitOpenUntilMs,
+        ).toISOString()} consecutive_429s=${this.consecutive429s}`,
+      );
     }
   }
 

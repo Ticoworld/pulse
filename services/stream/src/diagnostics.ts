@@ -81,6 +81,12 @@ export class StreamDiagnostics {
   private totalEnqueueCount = 0;
   private intervalDuplicateDrops = 0;
   private totalDuplicateDrops = 0;
+  private intervalSignaturesReceived = 0;
+  private intervalSignaturesDropped = 0;
+  private intervalFetchRequestsAttempted = 0;
+  private intervalFetchSignaturesAttempted = 0;
+  private intervalFetchSignaturesSkipped = 0;
+  private readonly intervalDropReasons = new Map<string, number>();
 
   private readonly intervalEventTypeCounts = new Map<string, number>();
   private readonly intervalMintCounts = new Map<string, number>();
@@ -123,6 +129,27 @@ export class StreamDiagnostics {
   onDuplicateSignatureDropped(): void {
     this.intervalDuplicateDrops += 1;
     this.totalDuplicateDrops += 1;
+  }
+
+  onSignatureReceived(): void {
+    this.intervalSignaturesReceived += 1;
+  }
+
+  onSignatureDropped(reason: string): void {
+    this.intervalSignaturesDropped += 1;
+    this.intervalDropReasons.set(
+      reason,
+      (this.intervalDropReasons.get(reason) ?? 0) + 1,
+    );
+  }
+
+  onFetchAttempt(signatureCount: number): void {
+    this.intervalFetchRequestsAttempted += 1;
+    this.intervalFetchSignaturesAttempted += signatureCount;
+  }
+
+  onFetchSkipped(signatureCount: number): void {
+    this.intervalFetchSignaturesSkipped += signatureCount;
   }
 
   onBatchSettled(signatures: readonly string[]): void {
@@ -211,6 +238,7 @@ export class StreamDiagnostics {
 
   private emitIntervalMetrics(): void {
     this.emitQueueMetrics("interval");
+    this.emitUsageSummary();
     this.emitMixSummary();
     this.emitFreshnessSummary();
     this.resetIntervalState();
@@ -255,6 +283,12 @@ export class StreamDiagnostics {
     );
   }
 
+  private emitUsageSummary(): void {
+    console.log(
+      `[stream] usage_summary interval_ms=${this.metricsIntervalMs} signatures_received=${this.intervalSignaturesReceived} signatures_enqueued=${this.intervalEnqueueCount} signatures_dropped=${this.intervalSignaturesDropped} duplicate_signature_drops=${this.intervalDuplicateDrops} tx_fetch_requests_attempted=${this.intervalFetchRequestsAttempted} tx_fetch_signatures_attempted=${this.intervalFetchSignaturesAttempted} tx_fetch_signatures_skipped=${this.intervalFetchSignaturesSkipped} estimated_http_request_units_per_minute=${this.intervalFetchRequestsAttempted} estimated_credits_burned_per_minute=unproven drop_reasons=${topEntries(this.intervalDropReasons, 10)}`,
+    );
+  }
+
   private emitFreshnessSummary(): void {
     console.log(
       `[stream] freshness_summary interval_ms=${this.metricsIntervalMs} samples=${this.intervalChainLagSeconds.length} oldest_chain_time_seen=${fmtIso(
@@ -275,8 +309,14 @@ export class StreamDiagnostics {
     this.intervalStartedAtMs = Date.now();
     this.intervalEnqueueCount = 0;
     this.intervalDuplicateDrops = 0;
+    this.intervalSignaturesReceived = 0;
+    this.intervalSignaturesDropped = 0;
+    this.intervalFetchRequestsAttempted = 0;
+    this.intervalFetchSignaturesAttempted = 0;
+    this.intervalFetchSignaturesSkipped = 0;
     this.intervalEventTypeCounts.clear();
     this.intervalMintCounts.clear();
+    this.intervalDropReasons.clear();
     this.intervalChainLagSeconds.length = 0;
     this.oldestChainTimeSeenMs = null;
     this.newestChainTimeSeenMs = null;

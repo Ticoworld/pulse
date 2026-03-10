@@ -2,6 +2,13 @@ import type { RawEvent, EventType } from "@pulse/common";
 
 export type { RawEvent, EventType };
 
+export interface HeliusSignatureNotice {
+  signature: string;
+  slot: number;
+  logs: string[];
+  programId?: string;
+}
+
 /** Raw shape of a Helius enhanced transaction (partial — only fields we map) */
 export interface HeliusTransaction {
   signature: string;

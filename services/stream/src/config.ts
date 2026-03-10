@@ -1,7 +1,13 @@
+export const RAYDIUM_AMM_V4_PROGRAM_ID =
+  "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin";
+export const ORCA_WHIRLPOOL_PROGRAM_ID =
+  "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc";
+export const JUPITER_V6_PROGRAM_ID =
+  "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
+
 const DEFAULT_TARGET_PROGRAMS = [
-  "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", // Raydium AMM v4
-  "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc", // Orca Whirlpool
-  "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", // Jupiter v6
+  RAYDIUM_AMM_V4_PROGRAM_ID, // Raydium AMM v4
+  ORCA_WHIRLPOOL_PROGRAM_ID, // Orca Whirlpool
 ];
 
 export const MAX_BATCH_SIZE = 50;
@@ -10,6 +16,7 @@ export const MAX_PROCESSED_SIGNATURE_CACHE_SIZE = 10_000;
 
 export const BASE_SOL_MINT = "So11111111111111111111111111111111111111112";
 export const BASE_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const STABLE_CONNECTION_RESET_MS = 60_000;
 
 function parseBooleanEnv(name: string, fallback: boolean): boolean {
   const value = process.env[name];
@@ -41,16 +48,21 @@ export function getHeliusNetwork(): "mainnet" | "devnet" {
 
 export function getTargetPrograms(): string[] {
   const configured = process.env.STREAM_TARGET_PROGRAMS;
-  if (!configured) {
-    return [...DEFAULT_TARGET_PROGRAMS];
+  const programs = configured
+    ? configured
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean)
+    : [...DEFAULT_TARGET_PROGRAMS];
+
+  if (getStreamAllowJupiterProgram()) {
+    return programs.length > 0 ? programs : [...DEFAULT_TARGET_PROGRAMS];
   }
 
-  const programs = configured
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-
-  return programs.length > 0 ? programs : [...DEFAULT_TARGET_PROGRAMS];
+  const filtered = programs.filter(
+    (programId) => programId !== JUPITER_V6_PROGRAM_ID,
+  );
+  return filtered.length > 0 ? filtered : [...DEFAULT_TARGET_PROGRAMS];
 }
 
 export function getHeliusWsBaseUrl(): string {
@@ -95,6 +107,22 @@ export function getStreamStaleEventWarnSeconds(): number {
   return parseNumberEnv("STREAM_STALE_EVENT_WARN_SECONDS", 120);
 }
 
+export function getStreamAllowJupiterProgram(): boolean {
+  return parseBooleanEnv("STREAM_ALLOW_JUPITER_PROGRAM", false);
+}
+
+export function getStreamHelius429Threshold(): number {
+  return parseNumberEnv("STREAM_HELIUS_429_THRESHOLD", 3);
+}
+
+export function getStreamHelius429CooldownMs(): number {
+  return parseNumberEnv("STREAM_HELIUS_429_COOLDOWN_MS", 900_000);
+}
+
+export function getStreamStableConnectionResetMs(): number {
+  return STABLE_CONNECTION_RESET_MS;
+}
+
 export interface StreamStartupConfig {
   targetPrograms: string[];
   batchSize: number;
@@ -110,6 +138,9 @@ export interface StreamStartupConfig {
   metricsIntervalMs: number;
   metricsEveryNSignatures: number;
   staleEventWarnSeconds: number;
+  allowJupiterProgram: boolean;
+  helius429Threshold: number;
+  helius429CooldownMs: number;
 }
 
 export function getStreamStartupConfig(apiKey: string): StreamStartupConfig {
@@ -128,5 +159,8 @@ export function getStreamStartupConfig(apiKey: string): StreamStartupConfig {
     metricsIntervalMs: getStreamMetricsIntervalMs(),
     metricsEveryNSignatures: getStreamMetricsEveryNSignatures(),
     staleEventWarnSeconds: getStreamStaleEventWarnSeconds(),
+    allowJupiterProgram: getStreamAllowJupiterProgram(),
+    helius429Threshold: getStreamHelius429Threshold(),
+    helius429CooldownMs: getStreamHelius429CooldownMs(),
   };
 }

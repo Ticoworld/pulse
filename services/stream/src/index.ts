@@ -21,11 +21,11 @@ const startupConfig = getStreamStartupConfig(apiKey);
 console.log(
   `[stream] startup_config target_programs=${JSON.stringify(
     startupConfig.targetPrograms,
-  )} batch_size=${startupConfig.batchSize} batch_sleep_ms=${startupConfig.batchSleepMs} replay_mode=${startupConfig.replayMode} backfill_enabled=${startupConfig.backfillEnabled} restart_resume_state=${startupConfig.restartResumeState} helius_ws_base_url=${startupConfig.heliusWsBaseUrl} helius_http_url=${startupConfig.heliusHttpUrl} dedupe_cache_size=${startupConfig.dedupeCacheSize} max_queue_depth=${startupConfig.maxQueueDepth} debug_metrics=${startupConfig.debugMetrics} metrics_interval_ms=${startupConfig.metricsIntervalMs} metrics_every_n_signatures=${startupConfig.metricsEveryNSignatures} stale_event_warn_seconds=${startupConfig.staleEventWarnSeconds}`,
+  )} batch_size=${startupConfig.batchSize} batch_sleep_ms=${startupConfig.batchSleepMs} replay_mode=${startupConfig.replayMode} backfill_enabled=${startupConfig.backfillEnabled} restart_resume_state=${startupConfig.restartResumeState} helius_ws_base_url=${startupConfig.heliusWsBaseUrl} helius_http_url=${startupConfig.heliusHttpUrl} dedupe_cache_size=${startupConfig.dedupeCacheSize} max_queue_depth=${startupConfig.maxQueueDepth} debug_metrics=${startupConfig.debugMetrics} metrics_interval_ms=${startupConfig.metricsIntervalMs} metrics_every_n_signatures=${startupConfig.metricsEveryNSignatures} stale_event_warn_seconds=${startupConfig.staleEventWarnSeconds} allow_jupiter_program=${startupConfig.allowJupiterProgram} helius_429_threshold=${startupConfig.helius429Threshold} helius_429_cooldown_ms=${startupConfig.helius429CooldownMs}`,
 );
 
-const provider = new HeliusProvider(apiKey, (signature) => {
-  processSignature(signature).catch((err) =>
+const provider = new HeliusProvider(apiKey, (notice) => {
+  processSignature(notice).catch((err) =>
     console.error("[stream] unhandled error in processSignature:", err),
   );
 });

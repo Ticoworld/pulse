@@ -2,14 +2,18 @@ import crypto from "crypto";
 import type { RawEvent } from "@pulse/common";
 import { insertRawEvent } from "@pulse/db";
 import {
+  BASE_SOL_MINT,
+  BASE_USDC_MINT,
+  JUPITER_V6_PROGRAM_ID,
   FETCH_INTERVAL_MS,
   MAX_BATCH_SIZE,
   MAX_PROCESSED_SIGNATURE_CACHE_SIZE,
   getHeliusHttpUrl,
+  getStreamAllowJupiterProgram,
   sanitizeHeliusUrl,
 } from "./config";
 import { StreamDiagnostics } from "./diagnostics";
-import type { HeliusTransaction } from "./types";
+import type { HeliusSignatureNotice, HeliusTransaction } from "./types";
 
 const SWAP_TYPES = new Set([
   "SWAP",
@@ -25,6 +29,23 @@ const MINT_TYPES = new Set([
   "INITIALIZE_MINT",
 ]);
 const TRANSFER_TYPES = new Set(["TRANSFER", "SYSTEM_TRANSFER"]);
+const BASE_MINTS = new Set([BASE_SOL_MINT, BASE_USDC_MINT]);
+const FETCH_KEEP_KEYWORDS = [
+  "swap",
+  "initialize",
+  "mint",
+  "create",
+  "route",
+  "liquidity",
+];
+const FETCH_NOISE_INSTRUCTION_KEYWORDS = [
+  "instruction: transfer",
+  "instruction: transferchecked",
+  "instruction: syncnative",
+  "instruction: closeaccount",
+  "instruction: close account",
+  "instruction: memo",
+];
 
 function classifyType(
   tx: HeliusTransaction,
@@ -43,7 +64,13 @@ function extractTokenInfo(tx: HeliusTransaction): {
   amount?: number;
   walletAddress?: string;
 } {
-  const transfer = tx.tokenTransfers?.[0];
+  const transfers = tx.tokenTransfers ?? [];
+  const transfer =
+    transfers.find(
+      (candidate) =>
+        candidate.mint != null && !BASE_MINTS.has(candidate.mint),
+    ) ?? transfers[0];
+
   if (transfer) {
     return {
       tokenMint: transfer.mint,
@@ -85,6 +112,18 @@ function normalize(tx: HeliusTransaction): RawEvent | null {
     timestamp: (tx.timestamp ?? Math.floor(Date.now() / 1000)) * 1000,
     rawPayload: tx,
   };
+}
+
+function shouldSkipInsert(event: RawEvent, tx: HeliusTransaction): boolean {
+  if (event.eventType !== "SWAP") {
+    return false;
+  }
+
+  const tokenMints = (tx.tokenTransfers ?? [])
+    .map((transfer) => transfer.mint)
+    .filter((mint): mint is string => Boolean(mint));
+
+  return tokenMints.length > 0 && tokenMints.every((mint) => BASE_MINTS.has(mint));
 }
 
 class FetchBatchHttpError extends Error {
@@ -148,12 +187,7 @@ function classifyFetchError(error: unknown): {
   };
 }
 
-export async function processSignature(signature: string): Promise<void> {
-  if (processedSignatures.has(signature)) {
-    diagnostics.onDuplicateSignatureDropped();
-    return;
-  }
-
+function rememberProcessedSignature(signature: string): void {
   if (processedSignatures.size > MAX_PROCESSED_SIGNATURE_CACHE_SIZE) {
     const iterator = processedSignatures.values();
     for (let index = 0; index < 1_000; index += 1) {
@@ -164,8 +198,71 @@ export async function processSignature(signature: string): Promise<void> {
   }
 
   processedSignatures.add(signature);
-  queue.push(signature);
-  diagnostics.onSignatureQueued(signature);
+}
+
+function isNoiseInstructionLog(line: string): boolean {
+  return FETCH_NOISE_INSTRUCTION_KEYWORDS.some((keyword) =>
+    line.includes(keyword),
+  );
+}
+
+function shouldDropBeforeFetch(notice: HeliusSignatureNotice): {
+  drop: boolean;
+  reason: string;
+} {
+  if (
+    !getStreamAllowJupiterProgram() &&
+    notice.programId === JUPITER_V6_PROGRAM_ID
+  ) {
+    return { drop: true, reason: "jupiter_program_disabled" };
+  }
+
+  const instructionLogs = notice.logs
+    .map((line) => line.toLowerCase())
+    .filter((line) => line.includes("instruction:"));
+
+  if (instructionLogs.length === 0) {
+    return { drop: false, reason: "no_instruction_logs" };
+  }
+
+  if (
+    instructionLogs.some((line) =>
+      FETCH_KEEP_KEYWORDS.some((keyword) => line.includes(keyword)),
+    )
+  ) {
+    return { drop: false, reason: "signal_keyword_present" };
+  }
+
+  if (instructionLogs.every((line) => isNoiseInstructionLog(line))) {
+    return { drop: true, reason: "transfer_only_logs" };
+  }
+
+  return { drop: false, reason: "unknown_keep" };
+}
+
+export async function processSignature(
+  notice: HeliusSignatureNotice,
+): Promise<void> {
+  diagnostics.onSignatureReceived();
+
+  if (processedSignatures.has(notice.signature)) {
+    diagnostics.onDuplicateSignatureDropped();
+    diagnostics.onSignatureDropped("duplicate_signature");
+    diagnostics.onFetchSkipped(1);
+    return;
+  }
+
+  const filterDecision = shouldDropBeforeFetch(notice);
+  if (filterDecision.drop) {
+    rememberProcessedSignature(notice.signature);
+    diagnostics.onSignatureDropped(filterDecision.reason);
+    diagnostics.onFetchSkipped(1);
+    return;
+  }
+
+  rememberProcessedSignature(notice.signature);
+  queue.push(notice.signature);
+  diagnostics.onSignatureQueued(notice.signature);
 
   if (!isFetching) {
     void processQueueLoop();
@@ -237,6 +334,8 @@ async function fetchAndProcessBatch(
   const apiKey = process.env.HELIUS_API_KEY;
   if (!apiKey) throw new Error("HELIUS_API_KEY is not set.");
 
+  diagnostics.onFetchAttempt(signatures.length);
+
   const url = getHeliusHttpUrl(apiKey);
   const maskedUrl = sanitizeHeliusUrl(url, apiKey);
 
@@ -275,6 +374,7 @@ async function fetchAndProcessBatch(
   for (const tx of txs) {
     const event = normalize(tx);
     if (!event) continue;
+    if (shouldSkipInsert(event, tx)) continue;
 
     console.log(
       `[stream] ${event.eventType} | sig: ${event.signature.slice(0, 12)}... | mint: ${
