@@ -136,6 +136,9 @@ export function formatNewMintSignal(signal: SignalLike): FormattedAlert {
 
   if (isRestream) {
     lines.push(`Source: Bags Restream`);
+    if (signal.token_mint) {
+      lines.push(`Token: https://solscan.io/token/${signal.token_mint}`);
+    }
   } else {
     lines.push(`Tx: https://solscan.io/tx/${signal.signature}`);
   }
