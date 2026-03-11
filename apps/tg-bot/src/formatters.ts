@@ -88,8 +88,46 @@ function primarySignalTime(
   };
 }
 
-function actorPreview(actorId: string): string {
-  return actorId.split("-")[0];
+
+/** Convert raw lamports to a human SOL string e.g. "28.13 SOL". Returns null if missing or zero. */
+function lamportsToSol(lamports: string | number | null | undefined): string | null {
+  if (lamports === null || lamports === undefined) return null;
+  const n = typeof lamports === "string" ? parseFloat(lamports) : lamports;
+  if (isNaN(n) || n <= 0) return null;
+  return (n / 1e9).toFixed(2) + " SOL";
+}
+
+/** Map a numeric score to a plain-English confidence label. */
+function scoreToLabel(score: number | string | null | undefined): string {
+  if (score === null || score === undefined) return "Unknown";
+  const n = typeof score === "string" ? parseFloat(score) : score;
+  if (isNaN(n)) return "Unknown";
+  if (n >= 80) return "Very High";
+  if (n >= 60) return "High";
+  if (n >= 40) return "Medium";
+  return "Low";
+}
+
+/** Shorten a long mint address for inline display: first 8 + "…" + last 4. */
+function shortMint(mint: string): string {
+  if (mint.length <= 16) return mint;
+  return mint.slice(0, 8) + "…" + mint.slice(-4);
+}
+
+/** Format a Date as "Mar 11, 12:44 PM UTC". Falls back to ISO string on error. */
+function formatTimeUtc(date: Date): string {
+  try {
+    return date.toLocaleString("en-US", {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZone: "UTC",
+      timeZoneName: "short",
+    });
+  } catch {
+    return date.toISOString().replace("T", " ").slice(0, 16) + " UTC";
+  }
 }
 
 export function formatAlphaWalletBuySignal(
@@ -98,27 +136,31 @@ export function formatAlphaWalletBuySignal(
   actor?: ActorSummary | null,
 ): FormattedAlert {
   const payload = asRecord(signal.payload);
+  const label = asString(payload.label);
+  const walletDisplay = signal.wallet_address
+    ? `${shortMint(signal.wallet_address)}${label ? ` (${label})` : ""}`
+    : "unknown";
+
   const lines: string[] = [
-    "ALPHA WALLET BUY",
-    `Wallet: ${signal.wallet_address ?? "unknown"}${asString(payload.label) ? ` (${asString(payload.label)})` : ""}`,
+    "👀 Watched wallet just bought",
+    "",
+    `Wallet: ${walletDisplay}`,
   ];
 
   if (walletProfile && walletProfile.tier !== "low") {
-    lines.push(`Quality: ${walletProfile.tier.toUpperCase()} (Score: ${walletProfile.score})`);
+    lines.push(`Wallet quality: ${scoreToLabel(walletProfile.score)}`);
   }
 
   if (actor) {
-    lines.push(
-      `Actor: ${actorPreview(actor.id)} (wallet cluster)`,
-      `Actor Tier: ${actor.tier.toUpperCase()}`,
-      `Cluster Size: ${actor.wallet_count} wallets`,
-    );
+    const actorQuality = actor.tier === "high" ? "High" : actor.tier === "medium" ? "Medium" : "Low";
+    lines.push(`Part of a cluster of ${actor.wallet_count} wallets (quality: ${actorQuality})`);
   }
 
-  if (signal.token_mint) lines.push(`Mint: ${signal.token_mint}`);
-  const amount = toText(payload.amount);
-  if (amount) lines.push(`Amount: ${amount}`);
-  lines.push(`Slot: ${signal.slot}`, `Tx: https://solscan.io/tx/${signal.signature}`);
+  if (signal.token_mint) {
+    lines.push(``, `Token: ${signal.token_mint}`, `→ https://solscan.io/token/${signal.token_mint}`);
+  }
+
+  lines.push(`Tx: https://solscan.io/tx/${signal.signature}`);
 
   return { text: lines.join("\n"), format: "plain", disableWebPagePreview: true };
 }
@@ -126,20 +168,20 @@ export function formatAlphaWalletBuySignal(
 export function formatNewMintSignal(signal: SignalLike): FormattedAlert {
   const time = primarySignalTime(signal);
   const isRestream = signal.signature.startsWith("restream_");
+  const mint = signal.token_mint ?? "unknown";
+
   const lines = [
-    "NEW MINT SEEN",
-    `Mint: ${signal.token_mint ?? "unknown"}`,
+    "🆕 New token just launched on Bags",
+    "",
+    `Mint: ${mint}`,
+    `Launched: ${formatTimeUtc(time.value)}`,
   ];
 
-  if (!isRestream && signal.slot) lines.push(`Slot: ${signal.slot}`);
-  lines.push(`${time.label}: ${time.value.toLocaleString()}`);
+  if (signal.token_mint) {
+    lines.push(``, `→ https://solscan.io/token/${signal.token_mint}`);
+  }
 
-  if (isRestream) {
-    lines.push(`Source: Bags Restream`);
-    if (signal.token_mint) {
-      lines.push(`Token: https://solscan.io/token/${signal.token_mint}`);
-    }
-  } else {
+  if (!isRestream) {
     lines.push(`Tx: https://solscan.io/tx/${signal.signature}`);
   }
 
@@ -150,26 +192,32 @@ export function formatLiquidityLiveSignal(signal: SignalLike): FormattedAlert {
   const payload = asRecord(signal.payload);
   const dev = asRecord(payload.dev);
   const time = primarySignalTime(signal);
+  const mint = signal.token_mint ?? "unknown";
+
   const lines = [
-    "LIQUIDITY LIVE",
-    `Mint: ${signal.token_mint ?? "unknown"}`,
+    "💧 Liquidity just went live",
+    "",
+    `Token: ${mint}`,
+    `Time: ${formatTimeUtc(time.value)}`,
   ];
 
   const probableDev = asString(dev.probable_dev_wallet);
   if (probableDev) {
+    const launches = toText(dev.launch_count) ?? "0";
+    const liquidityWins = toText(dev.liquidity_live_count) ?? "0";
+    const confidence = toText(dev.confidence);
     lines.push(
-      `Dev: ${probableDev}`,
-      `Dev confidence: ${toText(dev.confidence) ?? "unknown"}`,
-      `Dev launches: ${toText(dev.launch_count) ?? "0"}`,
-      `Dev liquidity success: ${toText(dev.liquidity_live_count) ?? "0"}`,
+      ``,
+      `Dev wallet: ${shortMint(probableDev)}`,
+      `Past launches: ${launches}  ·  ${liquidityWins} reached liquidity`,
     );
+    if (confidence) lines.push(`Dev confidence: ${confidence.charAt(0).toUpperCase() + confidence.slice(1)}`);
   }
 
-  lines.push(
-    `Slot: ${signal.slot}`,
-    `${time.label}: ${time.value.toLocaleString()}`,
-    `Tx: https://solscan.io/tx/${signal.signature}`,
-  );
+  if (signal.token_mint) {
+    lines.push(``, `→ https://solscan.io/token/${signal.token_mint}`);
+  }
+  lines.push(`Tx: https://solscan.io/tx/${signal.signature}`);
 
   return { text: lines.join("\n"), format: "plain", disableWebPagePreview: true };
 }
@@ -180,24 +228,30 @@ export function formatBagsEnrichmentResolvedSignal(signal: SignalLike): Formatte
   const creatorWallet = asString(payload.primary_creator_wallet);
   const creatorProvider = asString(payload.primary_creator_provider);
   const feesLamports = toText(payload.fees_lamports);
-  const status = asString(payload.enrichment_status) ?? "resolved";
+  const mint = signal.token_mint ?? "unknown";
+
+  const identity = creatorDisplay ?? (creatorWallet ? shortMint(creatorWallet) : null);
+  const creatorLine = identity
+    ? `${identity}${creatorProvider ? ` · ${creatorProvider}` : ""}`
+    : null;
+  const feesLine = lamportsToSol(feesLamports);
+
+  const header = creatorLine ? "👤 Creator identified" : "📋 Token context resolved";
 
   const lines = [
-    "BAGS RESOLVED CONTEXT",
-    `Mint: ${signal.token_mint ?? "unknown"}`,
-    `Status: ${status}`,
+    header,
+    "",
+    `Token: ${mint}`,
   ];
 
-  if (creatorDisplay || creatorWallet) {
-    const identity = creatorDisplay ?? creatorWallet ?? "unknown";
-    lines.push(`Creator: ${identity}${creatorProvider ? ` (${creatorProvider})` : ""}`);
+  if (creatorLine) lines.push(`Creator: ${creatorLine}`);
+  if (feesLine) lines.push(`Fees earned: ${feesLine}`);
+
+  if (signal.token_mint) {
+    lines.push(``, `→ https://solscan.io/token/${signal.token_mint}`);
   }
 
-  if (feesLamports) {
-    lines.push(`Fees (lamports): ${feesLamports}`);
-  }
-
-  return { text: lines.join("\n"), format: "plain" };
+  return { text: lines.join("\n"), format: "plain", disableWebPagePreview: true };
 }
 
 export function formatHighInterestSignal(
@@ -207,62 +261,59 @@ export function formatHighInterestSignal(
 ): FormattedAlert {
   const payload = asRecord(signal.payload);
   const triggers = asRecord(payload.triggers);
+  const score = toText(payload.score);
+  const mint = signal.token_mint ?? "unknown";
+
+  // Build plain-English "why" line
+  const whyParts: string[] = [];
+  if (asBool(triggers.alpha)) whyParts.push("tracked wallet bought early");
+  if (asBool(triggers.liquidity)) whyParts.push("liquidity is live");
+  if (asBool(triggers.dev)) whyParts.push("dev has prior launch history");
+  const whyLine = whyParts.length > 0 ? whyParts.join(" · ") : "multiple signals fired";
+
   const lines = [
-    "HIGH INTEREST TOKEN",
-    `Mint: ${signal.token_mint ?? "unknown"}`,
-    `Score: ${toText(payload.score) ?? "unknown"}`,
-    "Signals:",
+    "🔥 Strong signal detected",
+    "",
+    `Token: ${mint}`,
+    `Confidence: ${scoreToLabel(score)}`,
+    `Why: ${whyLine}`,
   ];
 
-  if (asBool(triggers.liquidity)) lines.push("- Liquidity Live");
-  if (asBool(triggers.alpha)) lines.push("- Alpha Wallet Buy");
-  if (asBool(triggers.dev)) lines.push("- Dev History");
-  if (lines[lines.length - 1] === "Signals:") {
-    lines.push("- none");
-  }
-
-  if (walletProfile) {
-    lines.push(`Alpha Quality: ${walletProfile.tier.toUpperCase()} (Score: ${walletProfile.score})`);
-  }
-
-  if (actor) {
-    lines.push(
-      `Actor: ${actorPreview(actor.id)} (wallet cluster)`,
-      `Actor Tier: ${actor.tier.toUpperCase()}`,
-      `Cluster Size: ${actor.wallet_count} wallets`,
-    );
-  }
-
-  const alphaWallet = asString(payload.alpha_wallet);
-  const devWallet = asString(payload.dev_wallet);
-  if (alphaWallet) lines.push(`Alpha Wallet: ${alphaWallet}`);
-  if (devWallet) lines.push(`Dev: ${devWallet}`);
-
-  const devLaunches = toText(payload.dev_launches);
-  const devLiquiditySuccess = toText(payload.dev_liquidity_success);
-  if (devLaunches) lines.push(`Dev launches: ${devLaunches}`);
-  if (devLiquiditySuccess) lines.push(`Dev liquidity success: ${devLiquiditySuccess}`);
-
-  const bagsBonus = toText(payload.bags_bonus);
-  const bagsReasons = Array.isArray(payload.bags_reasons)
-    ? payload.bags_reasons.map((x) => toText(x)).filter((x): x is string => Boolean(x))
-    : [];
   const bagsCreatorDisplay = asString(payload.primary_creator_display_name);
   const bagsCreatorProvider = asString(payload.primary_creator_provider);
   const bagsFees = toText(payload.fees_lamports);
-  const hasBagsContext = bagsBonus !== null || bagsReasons.length > 0 || bagsCreatorDisplay !== null || bagsFees !== null;
+  const feesLine = lamportsToSol(bagsFees);
 
-  if (hasBagsContext) {
-    lines.push("Bags Context:");
-    lines.push(`- Bonus: ${bagsBonus ?? "0"}`);
-    if (bagsReasons.length > 0) lines.push(`- Reasons: ${bagsReasons.join(", ")}`);
-    if (bagsCreatorDisplay) {
-      lines.push(`- Creator: ${bagsCreatorDisplay}${bagsCreatorProvider ? ` (${bagsCreatorProvider})` : ""}`);
-    }
-    if (bagsFees) lines.push(`- Fees (lamports): ${bagsFees}`);
+  if (bagsCreatorDisplay) {
+    lines.push(`Creator: ${bagsCreatorDisplay}${bagsCreatorProvider ? ` · ${bagsCreatorProvider}` : ""}`);
+  }
+  if (feesLine) lines.push(`Creator fees earned: ${feesLine}`);
+
+  const alphaWallet = asString(payload.alpha_wallet);
+  const devWallet = asString(payload.dev_wallet);
+  const devLaunches = toText(payload.dev_launches);
+  const devLiqSuccess = toText(payload.dev_liquidity_success);
+
+  if (alphaWallet) {
+    const walletLine = walletProfile
+      ? `${shortMint(alphaWallet)} (quality: ${scoreToLabel(walletProfile.score)})`
+      : shortMint(alphaWallet);
+    lines.push(`Buyer wallet: ${walletLine}`);
+  }
+  if (actor) {
+    lines.push(`Part of a cluster of ${actor.wallet_count} tracked wallets`);
+  }
+  if (devWallet) {
+    const devDetail = devLaunches
+      ? ` · ${devLaunches} launches, ${devLiqSuccess ?? "0"} reached liquidity`
+      : "";
+    lines.push(`Dev wallet: ${shortMint(devWallet)}${devDetail}`);
   }
 
-  lines.push(`Token: https://solscan.io/token/${signal.token_mint ?? ""}`);
+  if (signal.token_mint) {
+    lines.push(``, `→ https://solscan.io/token/${signal.token_mint}`);
+    lines.push(`Use /check ${signal.token_mint} for full details`);
+  }
 
   return { text: lines.join("\n"), format: "plain", disableWebPagePreview: true };
 }
@@ -351,49 +402,41 @@ export interface TopCandidateDigestRow {
 }
 
 /**
- * Format ranked digest of top HIGH_INTEREST candidates for Telegram (plain text).
- * Shows rank, mint, final/base score, Bags bonus, triggers, creator, fees. Compact.
+ * Format ranked digest of top HIGH_INTEREST tokens for Telegram (plain text).
  */
 export function formatTopCandidatesDigest(
   rows: TopCandidateDigestRow[],
   opts: { title?: string; freshnessHours?: number } = {},
 ): FormattedAlert {
-  const title = opts.title ?? "Top HIGH_INTEREST candidates";
   const freshness = opts.freshnessHours ?? 24;
-  const lines: string[] = [`${title} (last ${freshness}h, by score)`, ""];
+  const lines: string[] = [`🔥 Top tokens right now (last ${freshness}h)`, ""];
 
   if (rows.length === 0) {
-    lines.push("No HIGH_INTEREST candidates in freshness window.");
+    lines.push("No strong signals in the last " + freshness + " hours.");
     return { text: lines.join("\n"), format: "plain" };
   }
 
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     const rank = i + 1;
-    const meta = asRecord(r.metadata ?? {});
-    const baseScore = toText(meta.base_score) ?? "-";
-    const bagsBonus = toText(meta.bags_bonus) ?? "0";
-    const triggers: string[] = [];
-    if (r.liquidity_live_trigger) triggers.push("liq");
-    if (r.alpha_wallet_trigger) triggers.push("alpha");
-    if (r.dev_trigger) triggers.push("dev");
-    const triggerStr = triggers.length ? triggers.join(",") : "-";
-    const bagsReasons = Array.isArray(meta.bags_reasons)
-      ? (meta.bags_reasons as unknown[]).map((x) => toText(x)).filter((x): x is string => Boolean(x))
-      : [];
-    const bagsStr = bagsReasons.length ? bagsReasons.join(",") : "-";
-    const creator = r.primary_creator_display_name ?? null;
-    const creatorStr = creator
-      ? `${creator}${r.primary_creator_provider ? ` (${r.primary_creator_provider})` : ""}`
-      : "-";
-    const feesStr = r.fees_lamports ?? "-";
 
-    lines.push(
-      `${rank}. ${r.mint}`,
-      `   score=${r.score} base=${baseScore} bags=${bagsBonus} | ${triggerStr} | bags: ${bagsStr}`,
-      `   creator: ${creatorStr} | fees: ${feesStr}`,
-      "",
-    );
+    const why: string[] = [];
+    if (r.liquidity_live_trigger) why.push("liquidity live");
+    if (r.alpha_wallet_trigger) why.push("tracked wallet bought");
+    if (r.dev_trigger) why.push("dev history");
+    const whyStr = why.length ? why.join(" · ") : "signals fired";
+
+    const creator = r.primary_creator_display_name
+      ? `${r.primary_creator_display_name}${r.primary_creator_provider ? ` · ${r.primary_creator_provider}` : ""}`
+      : null;
+
+    const feesLine = lamportsToSol(r.fees_lamports);
+
+    lines.push(`${rank}. ${shortMint(r.mint)}`);
+    lines.push(`   Confidence: ${scoreToLabel(r.score)}  ·  Why: ${whyStr}`);
+    if (creator) lines.push(`   Creator: ${creator}`);
+    if (feesLine) lines.push(`   Creator fees: ${feesLine}`);
+    lines.push("");
   }
 
   return { text: lines.join("\n").trimEnd(), format: "plain", disableWebPagePreview: true };
@@ -413,23 +456,35 @@ export interface MintSummaryView {
 export function formatMintSummary(summary: MintSummaryView): FormattedAlert {
   if (!summary.foundInDb) {
     return {
-      text: `No DB record found for mint ${summary.mint}.`,
+      text: [
+        "Token not found in our database.",
+        "",
+        `Mint: ${summary.mint}`,
+        "",
+        "This token may have launched before Pulse was running, or has not been seen yet.",
+      ].join("\n"),
       format: "plain",
     };
   }
 
   const creator = summary.primaryCreatorDisplayName
-    ? `${summary.primaryCreatorDisplayName}${summary.primaryCreatorProvider ? ` (${summary.primaryCreatorProvider})` : ""}`
-    : "-";
+    ? `${summary.primaryCreatorDisplayName}${summary.primaryCreatorProvider ? ` · ${summary.primaryCreatorProvider}` : ""}`
+    : "Not identified yet";
+
+  const feesLine = lamportsToSol(summary.feesLamports) ?? "Not available";
+  const confidenceLabel = scoreToLabel(summary.score);
+  const strongSignal = summary.hasHighInterestSignal ? "Yes — this token fired a strong signal" : "No";
 
   const lines = [
-    "MINT SUMMARY",
+    "Token check",
+    "",
     `Mint: ${summary.mint}`,
-    `Latest candidate score: ${summary.score ?? "-"}`,
-    `Bags bonus: ${summary.bagsBonus ?? "-"}`,
+    `Confidence: ${confidenceLabel}`,
+    `Strong signal: ${strongSignal}`,
     `Creator: ${creator}`,
-    `Fees (lamports): ${summary.feesLamports ?? "-"}`,
-    `HIGH_INTEREST signal: ${summary.hasHighInterestSignal ? "yes" : "no"}`,
+    `Creator fees earned: ${feesLine}`,
+    ``,
+    `→ https://solscan.io/token/${summary.mint}`,
   ];
 
   return { text: lines.join("\n"), format: "plain", disableWebPagePreview: true };
@@ -438,35 +493,35 @@ export function formatMintSummary(summary: MintSummaryView): FormattedAlert {
 export function formatFollowedHighInterestAlert(signal: SignalLike): FormattedAlert {
   const payload = asRecord(signal.payload);
   const triggers = asRecord(payload.triggers);
-  const score = toText(payload.score) ?? "unknown";
-  const bagsBonus = toText(payload.bags_bonus) ?? "0";
+  const score = toText(payload.score);
   const creatorDisplay = asString(payload.primary_creator_display_name);
   const creatorProvider = asString(payload.primary_creator_provider);
   const feesLamports = toText(payload.fees_lamports);
+  const mint = signal.token_mint ?? "unknown";
 
-  const triggerParts: string[] = [];
-  if (asBool(triggers.liquidity)) triggerParts.push("liquidity");
-  if (asBool(triggers.alpha)) triggerParts.push("alpha");
-  if (asBool(triggers.dev)) triggerParts.push("dev");
-  const triggerSummary = triggerParts.length > 0 ? triggerParts.join(", ") : "none";
+  const whyParts: string[] = [];
+  if (asBool(triggers.alpha)) whyParts.push("tracked wallet bought early");
+  if (asBool(triggers.liquidity)) whyParts.push("liquidity is live");
+  if (asBool(triggers.dev)) whyParts.push("dev has prior history");
+  const whyLine = whyParts.length > 0 ? whyParts.join(" · ") : "multiple signals fired";
 
   const lines = [
-    "FOLLOWED MINT ALERT",
-    `Mint: ${signal.token_mint ?? "unknown"}`,
-    `Score: ${score} | Bags bonus: ${bagsBonus}`,
-    `Triggers: ${triggerSummary}`,
+    "🔔 Update on a token you follow",
+    "",
+    `Token: ${mint}`,
+    `Confidence: ${scoreToLabel(score)}`,
+    `Why: ${whyLine}`,
   ];
 
   if (creatorDisplay) {
-    lines.push(
-      `Creator: ${creatorDisplay}${creatorProvider ? ` (${creatorProvider})` : ""}`,
-    );
+    lines.push(`Creator: ${creatorDisplay}${creatorProvider ? ` · ${creatorProvider}` : ""}`);
   }
-  if (feesLamports) {
-    lines.push(`Fees (lamports): ${feesLamports}`);
-  }
+  const feesLine = lamportsToSol(feesLamports);
+  if (feesLine) lines.push(`Creator fees earned: ${feesLine}`);
 
-  lines.push("Note: informational signal for a mint you follow.");
+  if (signal.token_mint) {
+    lines.push(``, `→ https://solscan.io/token/${signal.token_mint}`);
+  }
 
   return { text: lines.join("\n"), format: "plain", disableWebPagePreview: true };
 }

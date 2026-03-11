@@ -84,7 +84,7 @@ const PUBLIC_COMMAND_COOLDOWN_SECONDS = Number.parseInt(
   process.env.TG_PUBLIC_COMMAND_COOLDOWN_SECONDS ?? "30",
   10,
 );
-const COOLDOWN_COMMANDS = ["/top_candidates", "/mint"];
+const COOLDOWN_COMMANDS = ["/top_candidates", "/hot", "/mint", "/check"];
 const FOLLOWED_HIGH_INTEREST_DELIVERY_KIND = "followed_high_interest";
 const OWNER_SIGNAL_DELIVERY_KIND = "owner_signal";
 
@@ -100,13 +100,13 @@ const sendOwnerAlert = createOwnerAlertSender({
 });
 
 bot.setMyCommands([
-  { command: "start", description: "Start the bot" },
-  { command: "help", description: "Show command list" },
-  { command: "top_candidates", description: "Launch and alpha signals (24h)" },
-  { command: "mint", description: "Query a mint for Bags context" },
-  { command: "follow", description: "Follow a mint for alerts" },
-  { command: "unfollow", description: "Unfollow a mint" },
-  { command: "following", description: "List your followed mints" },
+  { command: "start", description: "What is this bot?" },
+  { command: "help", description: "Show all commands" },
+  { command: "check", description: "Look up any token by address" },
+  { command: "hot", description: "Top tokens from the last 24 hours" },
+  { command: "follow", description: "Get updates on a specific token" },
+  { command: "unfollow", description: "Stop following a token" },
+  { command: "following", description: "See what you are following" },
 ]).catch((err) => {
   console.error("[tg-bot] setMyCommands failed:", err);
 });
@@ -236,20 +236,19 @@ function parseFirstArg(argsRaw: string | null): string | null {
 function buildHelpText(owner: boolean): string {
   const lines = [
     "Commands:",
-    "/start - welcome and quick command intro",
-    "/help - command list",
-    "/top_candidates [limit] - top HIGH_INTEREST candidates from DB (24h window)",
-    "/mint <address> - DB-backed mint summary",
-    "/follow <mint> - follow a mint for personalized HIGH_INTEREST alerts",
-    "/unfollow <mint> - stop follow alerts for a mint",
-    "/following - list your followed mints",
+    "/check <address> — look up any token",
+    "/hot — top tokens from the last 24 hours",
+    "/follow <address> — get updates when a token fires a strong signal",
+    "/unfollow <address> — stop following a token",
+    "/following — see what you are following",
+    "/help — show this list",
   ];
 
   if (owner) {
     lines.push(
       "",
-      "Owner admin commands:",
-      "/watchlist_add <wallet> [label]",
+      "Owner commands:",
+      "/watchlist_add <wallet> [label] — track a wallet for early buy signals",
       "/watchlist_remove <wallet>",
       "/watchlist_list",
     );
@@ -260,8 +259,13 @@ function buildHelpText(owner: boolean): string {
 
 function buildStartText(owner: boolean): string {
   const lines = [
-    "Pulse Bags bot is live.",
-    "Public commands are read-only and DB-backed.",
+    "Pulse watches every new Bags token launch in real time and tells you who is behind it before the chart moves.",
+    "",
+    "You will get alerts when:",
+    "• a new token launches on Bags",
+    "• the creator's identity is confirmed",
+    "• liquidity goes live",
+    "• a wallet you are tracking buys early",
     "",
     buildHelpText(owner),
   ];
@@ -594,7 +598,7 @@ registerCommand(/^\/watchlist_list(?:@\w+)?$/, "/watchlist_list", async (ctx) =>
   }
 });
 
-registerCommand(/^\/top_candidates(?:@\w+)?(?:\s+(.+))?$/, "/top_candidates", async (ctx) => {
+async function handleHotCommand(ctx: CommandContext): Promise<CommandResult> {
   const cooldownGate = await enforcePublicCooldown(ctx);
   if (cooldownGate) return cooldownGate;
 
@@ -604,8 +608,8 @@ registerCommand(/^\/top_candidates(?:@\w+)?(?:\s+(.+))?$/, "/top_candidates", as
     if (Number.isNaN(parsed)) {
       await sendPlainText(
         ctx.msg.chat.id,
-        "Usage: /top_candidates [limit]",
-        "/top_candidates usage",
+        "Usage: /hot [number]  e.g. /hot 5",
+        "/hot usage",
       );
       return { success: false, errorMessage: "invalid_args" };
     }
@@ -630,41 +634,37 @@ registerCommand(/^\/top_candidates(?:@\w+)?(?:\s+(.+))?$/, "/top_candidates", as
         primary_creator_provider: r.primary_creator_provider,
         fees_lamports: r.fees_lamports,
       })),
-      {
-        title: "Top HIGH_INTEREST candidates",
-        freshnessHours: TOP_CANDIDATES_FRESHNESS_HOURS,
-      },
+      { freshnessHours: TOP_CANDIDATES_FRESHNESS_HOURS },
     );
 
     const sent = await sendChatAlert({
       ...alert,
       chatId: ctx.msg.chat.id,
-      context: "/top_candidates digest",
+      context: "/hot digest",
     });
     if (sent) {
-      console.log(`[tg-bot] sent /top_candidates digest to ${ctx.telegramUserId}, count=${rows.length}`);
+      console.log(`[tg-bot] sent /hot digest to ${ctx.telegramUserId}, count=${rows.length}`);
       return { success: true };
     }
     return { success: false, errorMessage: "send_failed" };
   } catch (err) {
     const errorMessage = formatErrorForLog(err, token);
-    console.error("[tg-bot] top_candidates error:", errorMessage);
-    await sendPlainText(
-      ctx.msg.chat.id,
-      "Failed to fetch top candidates. Check logs.",
-      "/top_candidates failed",
-    );
+    console.error("[tg-bot] hot error:", errorMessage);
+    await sendPlainText(ctx.msg.chat.id, "Could not load top tokens right now. Try again shortly.", "/hot failed");
     return { success: false, errorMessage };
   }
-});
+}
 
-registerCommand(/^\/mint(?:@\w+)?(?:\s+(.+))?$/, "/mint", async (ctx) => {
+registerCommand(/^\/hot(?:@\w+)?(?:\s+(.+))?$/, "/hot", handleHotCommand);
+registerCommand(/^\/top_candidates(?:@\w+)?(?:\s+(.+))?$/, "/top_candidates", handleHotCommand);
+
+async function handleCheckCommand(ctx: CommandContext): Promise<CommandResult> {
   const cooldownGate = await enforcePublicCooldown(ctx);
   if (cooldownGate) return cooldownGate;
 
   const mint = parseFirstArg(ctx.argsRaw);
   if (!mint) {
-    await sendPlainText(ctx.msg.chat.id, "Usage: /mint <address>", "/mint usage");
+    await sendPlainText(ctx.msg.chat.id, "Usage: /check <token address>", "/check usage");
     return { success: false, errorMessage: "invalid_args" };
   }
 
@@ -683,16 +683,19 @@ registerCommand(/^\/mint(?:@\w+)?(?:\s+(.+))?$/, "/mint", async (ctx) => {
     const sent = await sendChatAlert({
       ...alert,
       chatId: ctx.msg.chat.id,
-      context: "/mint summary",
+      context: "/check summary",
     });
     return sent ? { success: true } : { success: false, errorMessage: "send_failed" };
   } catch (err) {
     const errorMessage = formatErrorForLog(err, token);
-    console.error("[tg-bot] mint lookup error:", errorMessage);
-    await sendPlainText(ctx.msg.chat.id, "Failed to fetch mint summary. Check logs.", "/mint failed");
+    console.error("[tg-bot] check lookup error:", errorMessage);
+    await sendPlainText(ctx.msg.chat.id, "Could not look up that token right now. Try again shortly.", "/check failed");
     return { success: false, errorMessage };
   }
-});
+}
+
+registerCommand(/^\/check(?:@\w+)?(?:\s+(.+))?$/, "/check", handleCheckCommand);
+registerCommand(/^\/mint(?:@\w+)?(?:\s+(.+))?$/, "/mint", handleCheckCommand);
 
 registerCommand(/^\/follow(?:@\w+)?(?:\s+(.+))?$/, "/follow", async (ctx) => {
   const mint = parseFirstArg(ctx.argsRaw);
