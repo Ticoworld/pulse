@@ -125,13 +125,20 @@ export function formatAlphaWalletBuySignal(
 
 export function formatNewMintSignal(signal: SignalLike): FormattedAlert {
   const time = primarySignalTime(signal);
+  const isRestream = signal.signature.startsWith("restream_");
   const lines = [
     "NEW MINT SEEN",
     `Mint: ${signal.token_mint ?? "unknown"}`,
-    `Slot: ${signal.slot}`,
-    `${time.label}: ${time.value.toLocaleString()}`,
-    `Tx: https://solscan.io/tx/${signal.signature}`,
   ];
+
+  if (!isRestream && signal.slot) lines.push(`Slot: ${signal.slot}`);
+  lines.push(`${time.label}: ${time.value.toLocaleString()}`);
+
+  if (isRestream) {
+    lines.push(`Source: Bags Restream`);
+  } else {
+    lines.push(`Tx: https://solscan.io/tx/${signal.signature}`);
+  }
 
   return { text: lines.join("\n"), format: "plain", disableWebPagePreview: true };
 }
