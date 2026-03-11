@@ -9,6 +9,7 @@ import {
   MAX_PROCESSED_SIGNATURE_CACHE_SIZE,
   getHeliusHttpUrl,
   getStreamAllowJupiterProgram,
+  getStreamAllowMeteoraDammV2,
   getStreamBatchMinSleepMs,
   getStreamMaxQueueDepth,
   getStreamMaxQueuedAgeSeconds,
@@ -61,6 +62,16 @@ const FETCH_KEEP_KEYWORDS = [
   "create",
   "route",
   "liquidity",
+];
+
+// In bags_only mode with DAMM v2 disabled, we only need pool/mint creation
+// events to fire NEW_MINT_SEEN. Swap/liquidity/route instructions produce
+// LIQUIDITY_LIVE and ALPHA_BUY signals that require DAMM v2 to be meaningful.
+// Dropping them before the HTTP fetch eliminates ~90% of Helius credit burn.
+const BAGS_ONLY_CREATION_KEYWORDS = [
+  "initialize",
+  "mint",
+  "create",
 ];
 
 const FETCH_NOISE_INSTRUCTION_KEYWORDS = [
@@ -311,6 +322,21 @@ function shouldDropBeforeFetch(notice: HeliusSignatureNotice): {
 
   if (instructionLogs.length === 0) {
     return { drop: false, reason: "no_instruction_logs" };
+  }
+
+  // bags_only mode with DAMM v2 disabled: only fetch pool/mint creation events.
+  // Swap, liquidity, and route instructions cannot produce NEW_MINT_SEEN and
+  // cannot produce LIQUIDITY_LIVE without DAMM v2. Dropping them before the
+  // HTTP fetch cuts ~90% of Helius credit usage at the cost of no additional
+  // signal loss beyond what disabling DAMM v2 already accepted.
+  if (getStreamMode() === "bags_only" && !getStreamAllowMeteoraDammV2()) {
+    const hasCreationKeyword = instructionLogs.some((line) =>
+      BAGS_ONLY_CREATION_KEYWORDS.some((keyword) => line.includes(keyword)),
+    );
+    if (!hasCreationKeyword) {
+      return { drop: true, reason: "bags_only_non_creation_tx" };
+    }
+    return { drop: false, reason: "bags_only_creation_tx" };
   }
 
   if (
