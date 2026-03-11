@@ -473,14 +473,14 @@ async function processQueueLoop(): Promise<void> {
       );
     }
 
-    if (queue.length > 0) {
-      const isBehind = queue.length > MAX_BATCH_SIZE;
-      if (!isBehind) {
-        const minSleepMs = getStreamBatchMinSleepMs();
-        if (minSleepMs > 0) {
-          await new Promise((resolve) => setTimeout(resolve, minSleepMs));
-        }
-      }
+    // Always sleep between batches regardless of queue depth.
+    // The original isBehind bypass allowed rapid-fire fetches during DBC
+    // activity spikes, exhausting Helius free-tier HTTP credits within minutes.
+    // With STREAM_BATCH_MIN_SLEEP_MS controlling the rate, excess signatures
+    // will age out via STREAM_MAX_QUEUED_AGE_SECONDS rather than burning credits.
+    const minSleepMs = getStreamBatchMinSleepMs();
+    if (minSleepMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, minSleepMs));
     }
   }
 
