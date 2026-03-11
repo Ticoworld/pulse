@@ -97,8 +97,8 @@ export function getTargetPrograms(): string[] {
     const programs: string[] = [];
     if (getStreamAllowMeteoraDbc()) programs.push(METEORA_DBC_PROGRAM_ID);
     if (getStreamAllowMeteoraDammV2()) programs.push(METEORA_DAMM_V2_PROGRAM_ID);
-    // Always have at least DBC
-    return programs.length > 0 ? programs : [METEORA_DBC_PROGRAM_ID];
+    // Empty is valid: Restream handles launch detection, no Helius subscription needed.
+    return programs;
   }
 
   // hybrid / legacy: broader subscription set

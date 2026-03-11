@@ -9,6 +9,7 @@ import {
   getStreamAllowBagsRestream,
   getStreamAllowBagsPoolsPoll,
   getStreamMode,
+  getTargetPrograms,
 } from "./config";
 import {
   loadBagsPoolsSnapshot,
@@ -217,23 +218,30 @@ async function main(): Promise<void> {
   }
 
   // ── Step 3: Helius provider ──────────────────────────────────────────────
-  // In bags_only mode this line is only reached AFTER the snapshot await
-  // above succeeds, so knownBagsMints is already populated when the first
-  // DBC transaction signature arrives.
+  // Skip entirely when no programs are subscribed (e.g. DBC=false, DAMM v2=false).
+  // In that mode Restream handles all launch detection at zero Helius credit cost.
 
-  const heliusProvider = new HeliusProvider(apiKey!, (notice) => {
-    processSignature(notice).catch((err) =>
-      console.error("[stream] unhandled error in processSignature:", err),
+  let heliusProvider: HeliusProvider | null = null;
+  const targetPrograms = getTargetPrograms();
+
+  if (targetPrograms.length > 0) {
+    heliusProvider = new HeliusProvider(apiKey!, (notice) => {
+      processSignature(notice).catch((err) =>
+        console.error("[stream] unhandled error in processSignature:", err),
+      );
+    });
+    heliusProvider.start();
+  } else {
+    console.log(
+      "[stream] helius_provider_skipped reason=no_target_programs (restream_only mode)",
     );
-  });
-
-  heliusProvider.start();
+  }
 
   // ── Graceful shutdown ────────────────────────────────────────────────────
 
   const shutdown = (): void => {
     console.log("[stream] shutting down...");
-    heliusProvider.stop();
+    heliusProvider?.stop();
     bagsRestreamProvider?.stop();
     stopBagsPoolsPoller();
     stopStreamProcessing();
