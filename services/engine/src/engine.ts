@@ -20,6 +20,30 @@ import { processAlphaBuy } from "./clusterEngine";
 const POLL_INTERVAL_MS = 5_000;
 const BATCH_SIZE = 100;
 
+/**
+ * Check whether a one-shot signal type has already been fired for a mint.
+ *
+ * This is a belt-and-suspenders guard on top of the launch_candidate existence
+ * check. It prevents duplicate NEW_MINT_SEEN / LIQUIDITY_LIVE signals when two
+ * raw_events for the same mint are processed in separate poll cycles (the most
+ * common duplicate scenario with non-atomic read-then-write guards).
+ *
+ * Not a substitute for a DB UNIQUE(type, token_mint) constraint — that is the
+ * proper hard fix — but safe and effective for a single-worker engine.
+ */
+async function signalAlreadyFiredForMint(
+  type: string,
+  tokenMint: string,
+): Promise<boolean> {
+  const result = await query<{ exists: boolean }>(
+    `SELECT EXISTS(
+       SELECT 1 FROM signals WHERE type = $1 AND token_mint = $2
+     ) AS exists`,
+    [type, tokenMint],
+  );
+  return result.rows[0]?.exists === true;
+}
+
 interface RawEventRow {
   seq: string; // bigint comes back as string from pg driver
   event_type: string;
@@ -129,6 +153,27 @@ export async function runEngine(): Promise<() => void> {
       // 1. Process NEW_MINT_SEEN
       const candidateExists = await getLaunchCandidateByMint(row.token_mint);
       if (!candidateExists) {
+        // Belt-and-suspenders: check signals table directly before inserting.
+        // Catches the case where two TOKEN_MINT rows for the same mint land in
+        // separate poll cycles, both passing the candidateExists check before
+        // the first upsert is visible (non-atomic read-then-write race).
+        const alreadyFired = await signalAlreadyFiredForMint(
+          "NEW_MINT_SEEN",
+          row.token_mint,
+        );
+        if (alreadyFired) {
+          console.log(
+            `[engine] NEW_MINT_SEEN dedupe_skip mint=${row.token_mint} sig=${row.signature.slice(0, 12)}…`,
+          );
+          await upsertLaunchCandidateFirstSeen({
+            mint: row.token_mint,
+            firstSeenSeq: row.seq,
+            firstSeenAt: new Date(row.ts),
+            firstSeenSignature: row.signature,
+          });
+          return;
+        }
+
         const chainTime = new Date(row.ts);
         const engineProcessedAt = new Date();
         await upsertLaunchCandidateFirstSeen({
@@ -220,6 +265,18 @@ export async function runEngine(): Promise<() => void> {
       if (row.token_mint && !isBaseMint) {
         const candidate = await getLaunchCandidateByMint(row.token_mint);
         if (candidate && !candidate.liquidity_live_seq) {
+          // Belt-and-suspenders: same race guard as NEW_MINT_SEEN.
+          const alreadyFired = await signalAlreadyFiredForMint(
+            "LIQUIDITY_LIVE",
+            row.token_mint,
+          );
+          if (alreadyFired) {
+            console.log(
+              `[engine] LIQUIDITY_LIVE dedupe_skip mint=${row.token_mint} sig=${row.signature.slice(0, 12)}…`,
+            );
+            return;
+          }
+
           const chainTime = new Date(row.ts);
           const engineProcessedAt = new Date();
           await markLaunchCandidateLiquidityLive(
