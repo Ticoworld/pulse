@@ -1,4 +1,6 @@
 import "dotenv/config";
+import crypto from "crypto";
+import { insertRawEvent } from "@pulse/db";
 import { HeliusProvider } from "./providers/helius";
 import { BagsRestreamProvider } from "./providers/bags-restream";
 import { processSignature, stopStreamProcessing } from "./stream";
@@ -148,12 +150,37 @@ async function main(): Promise<void> {
         // Verify before registering — do not trust heuristic protobuf extraction blindly.
         console.log(`[stream] bags_restream_candidate_seen mint=${notice.mint}`);
         checkBagsMintViaApi(notice.mint)
-          .then((confirmed) => {
+          .then(async (confirmed) => {
             if (confirmed) {
               const isNew = registerBagsMint(notice.mint);
               if (isNew) {
                 console.log(
                   `[stream] bags_admission_accept reason=restream_verified mint=${notice.mint} bags_known_count=${getBagsMintCount()}`,
+                );
+              }
+              // Insert a synthetic TOKEN_MINT raw event so the engine fires
+              // NEW_MINT_SEEN immediately — without waiting for the Helius
+              // HTTP fetch, which may be delayed or age out during DBC bursts.
+              // The engine's signalAlreadyFiredForMint guard deduplicates if
+              // the real Helius tx also comes through later.
+              const syntheticSig = `restream_${notice.mint}_${crypto.createHash("sha256").update(notice.mint).digest("hex").slice(0, 8)}`;
+              try {
+                await insertRawEvent({
+                  source: "bags_restream",
+                  eventType: "TOKEN_MINT",
+                  signature: syntheticSig,
+                  slot: 0,
+                  tokenMint: notice.mint,
+                  timestamp: Date.now(),
+                  rawPayload: { source: "bags_restream", mint: notice.mint },
+                });
+                console.log(
+                  `[stream] bags_restream_direct_insert mint=${notice.mint} sig=${syntheticSig}`,
+                );
+              } catch (insertErr) {
+                console.error(
+                  `[stream] bags_restream_direct_insert_error mint=${notice.mint}:`,
+                  insertErr,
                 );
               }
             } else {
