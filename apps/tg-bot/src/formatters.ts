@@ -142,18 +142,18 @@ export function formatAlphaWalletBuySignal(
     : "unknown";
 
   const lines: string[] = [
-    "👀 Watched wallet just bought",
+    "👀 Watched whale wallet just bought",
     "",
     `Wallet: ${walletDisplay}`,
   ];
 
   if (walletProfile && walletProfile.tier !== "low") {
-    lines.push(`Wallet quality: ${scoreToLabel(walletProfile.score)}`);
+    lines.push(`Whale quality: ${scoreToLabel(walletProfile.score)}`);
   }
 
   if (actor) {
     const actorQuality = actor.tier === "high" ? "High" : actor.tier === "medium" ? "Medium" : "Low";
-    lines.push(`Part of a cluster of ${actor.wallet_count} wallets (quality: ${actorQuality})`);
+    lines.push(`Part of a cluster of ${actor.wallet_count} whale wallets (quality: ${actorQuality})`);
   }
 
   if (signal.token_mint) {
@@ -266,7 +266,7 @@ export function formatHighInterestSignal(
 
   // Build plain-English "why" line
   const whyParts: string[] = [];
-  if (asBool(triggers.alpha)) whyParts.push("tracked wallet bought early");
+  if (asBool(triggers.alpha)) whyParts.push("tracked whale wallet bought early");
   if (asBool(triggers.liquidity)) whyParts.push("liquidity is live");
   if (asBool(triggers.dev)) whyParts.push("dev has prior launch history");
   const whyLine = whyParts.length > 0 ? whyParts.join(" · ") : "multiple signals fired";
@@ -298,10 +298,10 @@ export function formatHighInterestSignal(
     const walletLine = walletProfile
       ? `${shortMint(alphaWallet)} (quality: ${scoreToLabel(walletProfile.score)})`
       : shortMint(alphaWallet);
-    lines.push(`Buyer wallet: ${walletLine}`);
+    lines.push(`Whale wallet: ${walletLine}`);
   }
   if (actor) {
-    lines.push(`Part of a cluster of ${actor.wallet_count} tracked wallets`);
+    lines.push(`Part of a cluster of ${actor.wallet_count} whale wallets`);
   }
   if (devWallet) {
     const devDetail = devLaunches
@@ -422,7 +422,7 @@ export function formatTopCandidatesDigest(
 
     const why: string[] = [];
     if (r.liquidity_live_trigger) why.push("liquidity live");
-    if (r.alpha_wallet_trigger) why.push("tracked wallet bought");
+    if (r.alpha_wallet_trigger) why.push("tracked whale wallet bought");
     if (r.dev_trigger) why.push("dev history");
     const whyStr = why.length ? why.join(" · ") : "signals fired";
 
@@ -500,7 +500,7 @@ export function formatFollowedHighInterestAlert(signal: SignalLike): FormattedAl
   const mint = signal.token_mint ?? "unknown";
 
   const whyParts: string[] = [];
-  if (asBool(triggers.alpha)) whyParts.push("tracked wallet bought early");
+  if (asBool(triggers.alpha)) whyParts.push("tracked whale wallet bought early");
   if (asBool(triggers.liquidity)) whyParts.push("liquidity is live");
   if (asBool(triggers.dev)) whyParts.push("dev has prior history");
   const whyLine = whyParts.length > 0 ? whyParts.join(" · ") : "multiple signals fired";

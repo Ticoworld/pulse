@@ -104,7 +104,7 @@ bot.setMyCommands([
   { command: "help", description: "Show all commands" },
   { command: "check", description: "Look up any token by address" },
   { command: "hot", description: "Top tokens from the last 24 hours" },
-  { command: "follow", description: "Get updates on a specific token" },
+  { command: "follow", description: "Get alerted if this token pumps" },
   { command: "unfollow", description: "Stop following a token" },
   { command: "following", description: "See what you are following" },
 ]).catch((err) => {
@@ -238,7 +238,7 @@ function buildHelpText(owner: boolean): string {
     "Commands:",
     "/check <address> — look up any token",
     "/hot — top tokens from the last 24 hours",
-    "/follow <address> — get updates when a token fires a strong signal",
+    "/follow <address> — track a token. You'll get a personal alert if it pumps or a tracked whale wallet buys it early",
     "/unfollow <address> — stop following a token",
     "/following — see what you are following",
     "/help — show this list",
@@ -265,7 +265,7 @@ function buildStartText(owner: boolean): string {
     "• a new token launches on Bags",
     "• the creator's identity is confirmed",
     "• liquidity goes live",
-    "• a wallet you are tracking buys early",
+    "• a whale wallet you are tracking buys early",
     "",
     buildHelpText(owner),
   ];
