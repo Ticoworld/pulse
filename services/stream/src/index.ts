@@ -76,23 +76,42 @@ async function main(): Promise<void> {
 
     if (mode === "bags_only") {
       // Blocking: Helius ingestion must not start until the gate is armed.
-      try {
-        const newCount = await loadBagsPoolsSnapshot();
-        console.log(
-          `[stream] bags_pools_snapshot_loaded count=${getBagsMintCount()} new=${newCount}`,
-        );
-        console.log("[stream] bags_admission_ready=true");
-        startBagsPoolsPoller();
-      } catch (err) {
-        // Fatal: in bags_only mode we cannot correctly gate admissions without
-        // the snapshot. Continuing would silently drop all Bags traffic.
-        console.error("[stream] FATAL bags_pools_snapshot_error:", err);
+      // Retry up to 3 times with backoff before giving up — transient API
+      // errors (rate limit, cold-start) must not kill a fresh deploy.
+      const MAX_TRIES = 3;
+      let lastErr: unknown;
+      let loaded = false;
+      for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
+        try {
+          const newCount = await loadBagsPoolsSnapshot();
+          console.log(
+            `[stream] bags_pools_snapshot_loaded count=${getBagsMintCount()} new=${newCount} attempt=${attempt}`,
+          );
+          loaded = true;
+          break;
+        } catch (err) {
+          lastErr = err;
+          console.error(
+            `[stream] bags_pools_snapshot_error attempt=${attempt}/${MAX_TRIES}:`,
+            err,
+          );
+          if (attempt < MAX_TRIES) {
+            const delay = attempt * 5_000;
+            console.log(`[stream] retrying snapshot in ${delay}ms…`);
+            await new Promise((r) => setTimeout(r, delay));
+          }
+        }
+      }
+      if (!loaded) {
+        console.error("[stream] FATAL bags_pools_snapshot_failed after all retries:", lastErr);
         console.error(
           "[stream] bags_only mode requires Bags snapshot on startup. " +
           "Check BAGS_API_KEY and BAGS_API_BASE_URL. Exiting.",
         );
         process.exit(1);
       }
+      console.log("[stream] bags_admission_ready=true");
+      startBagsPoolsPoller();
     } else {
       // hybrid: non-blocking, log when done, but do not hold up Helius start.
       loadBagsPoolsSnapshot()
