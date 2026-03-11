@@ -944,3 +944,19 @@ Promise.all([pollSignals(), pollExecutionOrders()]).catch((err) => {
 });
 
 console.log("[tg-bot] running - polling for updates and signals...");
+
+// Graceful shutdown: stop Telegram polling before process exits so the next
+// deploy instance does not get a 409 Conflict from a competing getUpdates call.
+async function shutdown(signal: string): Promise<void> {
+  console.log(`[tg-bot] ${signal} received — stopping polling...`);
+  try {
+    await bot.stopPolling();
+    console.log("[tg-bot] polling stopped, exiting");
+  } catch (e) {
+    console.error("[tg-bot] error stopping polling:", e);
+  }
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => { shutdown("SIGTERM").catch(() => process.exit(1)); });
+process.on("SIGINT",  () => { shutdown("SIGINT").catch(() => process.exit(1)); });
