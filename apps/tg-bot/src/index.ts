@@ -86,6 +86,7 @@ const PUBLIC_COMMAND_COOLDOWN_SECONDS = Number.parseInt(
 );
 const COOLDOWN_COMMANDS = ["/top_candidates", "/mint"];
 const FOLLOWED_HIGH_INTEREST_DELIVERY_KIND = "followed_high_interest";
+const OWNER_SIGNAL_DELIVERY_KIND = "owner_signal";
 
 const bot = new TelegramBot(token, { polling: true });
 const sendChatAlert = createChatAlertSender({
@@ -792,6 +793,23 @@ async function pollSignals(): Promise<void> {
         }
       }
 
+      // Belt-and-suspenders: skip if we've already delivered this signal to
+      // the owner. Catches the case where a signal slips back into the unsent
+      // queue (e.g. markSignalSent failed, engine cursor drift, or a duplicate
+      // row that survived before the DB unique index was applied).
+      const alreadyDelivered = await hasTelegramSignalDelivery(
+        OWNER_CHAT_ID,
+        signal.id,
+        OWNER_SIGNAL_DELIVERY_KIND,
+      );
+      if (alreadyDelivered) {
+        console.log(
+          `[tg-bot] owner_signal_dedupe_skip signal_id=${signal.id} type=${signal.type} mint=${signal.token_mint ?? "n/a"}`,
+        );
+        await markSignalSent(signal.id, new Date());
+        continue;
+      }
+
       const alert = await formatSignalAlert(signal);
       const ownerSent = await sendOwnerAlert({
         ...alert,
@@ -804,6 +822,16 @@ async function pollSignals(): Promise<void> {
         logSignalDeliveryTrace(signal, telegramSentAt);
         console.log(`[tg-bot] sent alert for signal ${signal.id}`);
       }
+
+      // Record delivery regardless of send outcome so re-polls never retry
+      // a signal that already reached Telegram (or was definitively skipped).
+      await recordTelegramSignalDelivery({
+        telegramUserId: OWNER_CHAT_ID,
+        signalId: signal.id,
+        deliveryKind: OWNER_SIGNAL_DELIVERY_KIND,
+        success: ownerSent,
+        errorMessage: ownerSent ? null : "send_failed",
+      });
 
       if (signal.type === "HIGH_INTEREST_TOKEN") {
         await sendFollowedHighInterestAlerts(signal);
