@@ -77,6 +77,19 @@ if (!process.env.DATABASE_URL) {
 }
 
 const OWNER_CHAT_ID = Number(ownerChatIdRaw);
+
+// Optional public channel — when set, broadcast alerts to the channel too
+const PUBLIC_CHANNEL_ID = process.env.PUBLIC_CHANNEL_ID
+  ? Number(process.env.PUBLIC_CHANNEL_ID)
+  : null;
+
+const BROADCAST_SIGNAL_TYPES = new Set([
+  "NEW_MINT_SEEN",
+  "BAGS_ENRICHMENT_RESOLVED",
+  "LIQUIDITY_LIVE",
+  "HIGH_INTEREST_TOKEN",
+]);
+
 const SIGNAL_POLL_INTERVAL_MS = 5_000;
 const TOP_CANDIDATES_DEFAULT_LIMIT = 10;
 const TOP_CANDIDATES_FRESHNESS_HOURS = 24;
@@ -833,6 +846,20 @@ async function pollSignals(): Promise<void> {
       if (ownerSent) {
         logSignalDeliveryTrace(signal, claimedAt);
         console.log(`[tg-bot] sent alert for signal ${signal.id}`);
+      }
+
+      // Broadcast to public channel if configured and signal type is public-worthy
+      if (PUBLIC_CHANNEL_ID && BROADCAST_SIGNAL_TYPES.has(signal.type)) {
+        try {
+          await sendChatAlert({
+            ...alert,
+            chatId: PUBLIC_CHANNEL_ID,
+            context: `channel broadcast signal=${signal.id} (${signal.type})`,
+          });
+          console.log(`[tg-bot] channel_broadcast signal_id=${signal.id} type=${signal.type}`);
+        } catch (broadcastErr) {
+          console.error(`[tg-bot] channel_broadcast_error signal_id=${signal.id}:`, formatErrorForLog(broadcastErr, token));
+        }
       }
 
       // Record delivery regardless of send outcome so re-polls never retry
