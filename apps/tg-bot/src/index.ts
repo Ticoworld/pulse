@@ -810,6 +810,13 @@ async function pollSignals(): Promise<void> {
         continue;
       }
 
+      // Claim the signal before sending: markSignalSent removes it from
+      // listUnsentSignals, so a concurrent or post-deploy instance cannot
+      // pick up and re-send the same signal even if we are killed between
+      // the send and the subsequent DB write.
+      const claimedAt = new Date();
+      await markSignalSent(signal.id, claimedAt);
+
       const alert = await formatSignalAlert(signal);
       const ownerSent = await sendOwnerAlert({
         ...alert,
@@ -817,9 +824,7 @@ async function pollSignals(): Promise<void> {
       });
 
       if (ownerSent) {
-        const telegramSentAt = new Date();
-        await markSignalSent(signal.id, telegramSentAt);
-        logSignalDeliveryTrace(signal, telegramSentAt);
+        logSignalDeliveryTrace(signal, claimedAt);
         console.log(`[tg-bot] sent alert for signal ${signal.id}`);
       }
 
