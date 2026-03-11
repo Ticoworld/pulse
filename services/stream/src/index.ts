@@ -148,48 +148,59 @@ async function main(): Promise<void> {
     bagsRestreamProvider = new BagsRestreamProvider(
       (notice) => {
         // Restream = speed signal. REST = truth.
-        // Verify before registering — do not trust heuristic protobuf extraction blindly.
+        // The Bags API typically takes 5–20s to index a new launch after
+        // Restream fires. Retry up to 3 times with 10s delays before giving up.
         console.log(`[stream] bags_restream_candidate_seen mint=${notice.mint}`);
-        checkBagsMintViaApi(notice.mint)
-          .then(async (confirmed) => {
-            if (confirmed) {
-              const isNew = registerBagsMint(notice.mint);
-              if (isNew) {
-                console.log(
-                  `[stream] bags_admission_accept reason=restream_verified mint=${notice.mint} bags_known_count=${getBagsMintCount()}`,
-                );
-              }
-              // Insert a synthetic TOKEN_MINT raw event so the engine fires
-              // NEW_MINT_SEEN immediately — without waiting for the Helius
-              // HTTP fetch, which may be delayed or age out during DBC bursts.
-              // The engine's signalAlreadyFiredForMint guard deduplicates if
-              // the real Helius tx also comes through later.
-              const syntheticSig = `restream_${notice.mint}_${crypto.createHash("sha256").update(notice.mint).digest("hex").slice(0, 8)}`;
-              try {
-                await insertRawEvent({
-                  source: "bags_restream",
-                  eventType: "TOKEN_MINT",
-                  signature: syntheticSig,
-                  slot: 0,
-                  tokenMint: notice.mint,
-                  timestamp: Date.now(),
-                  rawPayload: { source: "bags_restream", mint: notice.mint },
-                });
-                console.log(
-                  `[stream] bags_restream_direct_insert mint=${notice.mint} sig=${syntheticSig}`,
-                );
-              } catch (insertErr) {
-                console.error(
-                  `[stream] bags_restream_direct_insert_error mint=${notice.mint}:`,
-                  insertErr,
-                );
-              }
-            } else {
+
+        const RETRY_DELAYS_MS = [0, 10_000, 20_000]; // immediate, +10s, +20s
+
+        const attemptVerify = async (attempt: number): Promise<void> => {
+          const confirmed = await checkBagsMintViaApi(notice.mint);
+          if (confirmed) {
+            const isNew = registerBagsMint(notice.mint);
+            if (isNew) {
               console.log(
-                `[stream] bags_restream_candidate_rejected mint=${notice.mint} reason=api_not_found`,
+                `[stream] bags_admission_accept reason=restream_verified mint=${notice.mint} attempt=${attempt + 1} bags_known_count=${getBagsMintCount()}`,
               );
             }
-          })
+            const syntheticSig = `restream_${notice.mint}_${crypto.createHash("sha256").update(notice.mint).digest("hex").slice(0, 8)}`;
+            try {
+              await insertRawEvent({
+                source: "bags_restream",
+                eventType: "TOKEN_MINT",
+                signature: syntheticSig,
+                slot: 0,
+                tokenMint: notice.mint,
+                timestamp: Date.now(),
+                rawPayload: { source: "bags_restream", mint: notice.mint },
+              });
+              console.log(
+                `[stream] bags_restream_direct_insert mint=${notice.mint} sig=${syntheticSig}`,
+              );
+            } catch (insertErr) {
+              console.error(
+                `[stream] bags_restream_direct_insert_error mint=${notice.mint}:`,
+                insertErr,
+              );
+            }
+          } else if (attempt < RETRY_DELAYS_MS.length - 1) {
+            const delay = RETRY_DELAYS_MS[attempt + 1];
+            console.log(
+              `[stream] bags_restream_candidate_retry mint=${notice.mint} attempt=${attempt + 1} next_retry_ms=${delay}`,
+            );
+            setTimeout(() => {
+              attemptVerify(attempt + 1).catch((err) =>
+                console.error(`[stream] bags_restream_candidate_check_error mint=${notice.mint}:`, err),
+              );
+            }, delay);
+          } else {
+            console.log(
+              `[stream] bags_restream_candidate_rejected mint=${notice.mint} reason=api_not_found_after_retries`,
+            );
+          }
+        };
+
+        attemptVerify(0)
           .catch((err) => {
             console.error(
               `[stream] bags_restream_candidate_check_error mint=${notice.mint}:`,
