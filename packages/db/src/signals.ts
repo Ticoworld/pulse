@@ -127,11 +127,16 @@ export async function listUnsentSignals(limit = 10): Promise<Signal[]> {
 /**
  * Mark a signal as sent and record the sent timestamp.
  */
+/**
+ * Atomically claim a signal for sending. Returns true if this call
+ * successfully claimed it (sent_at was NULL), false if another instance
+ * already claimed it. Callers must skip sending when false is returned.
+ */
 export async function markSignalSent(
   id: string,
   sentAt = new Date(),
-): Promise<void> {
-  await query(
+): Promise<boolean> {
+  const result = await query(
     `UPDATE signals
      SET is_sent = true,
          sent_at = $2,
@@ -141,7 +146,7 @@ export async function markSignalSent(
            $3::jsonb,
            true
          )
-     WHERE id = $1`,
+     WHERE id = $1 AND sent_at IS NULL`,
     [
       id,
       sentAt,
@@ -152,6 +157,7 @@ export async function markSignalSent(
       }),
     ],
   );
+  return (result.rowCount ?? 0) > 0;
 }
 
 /**

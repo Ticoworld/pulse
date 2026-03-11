@@ -813,12 +813,16 @@ async function pollSignals(): Promise<void> {
         continue;
       }
 
-      // Claim the signal before sending: markSignalSent removes it from
-      // listUnsentSignals, so a concurrent or post-deploy instance cannot
-      // pick up and re-send the same signal even if we are killed between
-      // the send and the subsequent DB write.
+      // Atomically claim the signal. If another instance already claimed it
+      // (sent_at was not NULL), markSignalSent returns false — skip entirely.
       const claimedAt = new Date();
-      await markSignalSent(signal.id, claimedAt);
+      const claimed = await markSignalSent(signal.id, claimedAt);
+      if (!claimed) {
+        console.log(
+          `[tg-bot] signal_already_claimed signal_id=${signal.id} type=${signal.type} mint=${signal.token_mint ?? "n/a"}`,
+        );
+        continue;
+      }
 
       const alert = await formatSignalAlert(signal);
       const ownerSent = await sendOwnerAlert({
