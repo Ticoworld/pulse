@@ -66,6 +66,33 @@ async function main(): Promise<void> {
     ` stale_event_warn_seconds=${cfg.staleEventWarnSeconds}`,
   );
 
+  // ── Poll new-mint callback ───────────────────────────────────────────────
+  // When the periodic snapshot poll discovers mints not seen before, insert
+  // a synthetic TOKEN_MINT raw_event for each. This is the fallback path for
+  // launches where Restream fired but the individual API check timed out
+  // before the Bags API finished indexing (typically 30–60s after launch).
+
+  const onPollNewMints = (mints: string[]): void => {
+    for (const mint of mints) {
+      const syntheticSig = `restream_${mint}_${crypto.createHash("sha256").update(mint).digest("hex").slice(0, 8)}`;
+      insertRawEvent({
+        source: "bags_restream",
+        eventType: "TOKEN_MINT",
+        signature: syntheticSig,
+        slot: 0,
+        tokenMint: mint,
+        timestamp: Date.now(),
+        rawPayload: { source: "bags_poll_backfill", mint },
+      })
+        .then(() => {
+          console.log(`[stream] bags_poll_direct_insert mint=${mint} sig=${syntheticSig}`);
+        })
+        .catch((err) => {
+          console.error(`[stream] bags_poll_direct_insert_error mint=${mint}:`, err);
+        });
+    }
+  };
+
   // ── Step 1: Bags Pools snapshot ──────────────────────────────────────────
   // In bags_only mode: AWAIT the snapshot before starting Helius ingestion.
   // This eliminates the 7-second startup race where DBC txs are processed
@@ -114,7 +141,7 @@ async function main(): Promise<void> {
         process.exit(1);
       }
       console.log("[stream] bags_admission_ready=true");
-      startBagsPoolsPoller();
+      startBagsPoolsPoller(onPollNewMints);
     } else {
       // hybrid: non-blocking, log when done, but do not hold up Helius start.
       loadBagsPoolsSnapshot()
@@ -123,11 +150,11 @@ async function main(): Promise<void> {
             `[stream] bags_pools_snapshot_loaded count=${getBagsMintCount()} new=${newCount}`,
           );
           console.log("[stream] bags_admission_ready=true");
-          startBagsPoolsPoller();
+          startBagsPoolsPoller(onPollNewMints);
         })
         .catch((err) => {
           console.error("[stream] bags_pools_snapshot_error (continuing in hybrid mode):", err);
-          startBagsPoolsPoller();
+          startBagsPoolsPoller(onPollNewMints);
         });
     }
   } else if (mode !== "legacy") {

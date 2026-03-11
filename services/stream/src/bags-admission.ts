@@ -162,17 +162,35 @@ export async function loadBagsPoolsSnapshot(): Promise<number> {
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
-export function startBagsPoolsPoller(): void {
+/**
+ * Start the background Bags pools poller.
+ *
+ * @param onNewMints - Optional callback invoked with newly-discovered mint
+ *   addresses whenever the poll finds mints not previously in knownBagsMints.
+ *   Used by index.ts to insert synthetic TOKEN_MINT raw_events for launches
+ *   that Restream detected but the individual API check could not confirm
+ *   within the retry window.
+ */
+export function startBagsPoolsPoller(
+  onNewMints?: (mints: string[]) => void,
+): void {
   const pollMs = getStreamBagsPoolsPollMs();
 
   const poll = async (): Promise<void> => {
     try {
-      const before = knownBagsMints.size;
+      const before = new Set(knownBagsMints);
       await loadBagsPoolsSnapshot();
-      const newCount = knownBagsMints.size - before;
+      const newCount = knownBagsMints.size - before.size;
       console.log(
         `[stream] bags_pools_poll_success total=${knownBagsMints.size} new=${newCount}`,
       );
+      if (newCount > 0 && onNewMints) {
+        const newMints: string[] = [];
+        for (const mint of knownBagsMints) {
+          if (!before.has(mint)) newMints.push(mint);
+        }
+        if (newMints.length > 0) onNewMints(newMints);
+      }
     } catch (err) {
       console.error("[stream] bags_pools_poll_error:", err);
     }
