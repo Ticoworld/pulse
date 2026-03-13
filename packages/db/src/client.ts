@@ -10,7 +10,11 @@ export function getPool(): pg.Pool {
     if (!connectionString) {
       throw new Error("DATABASE_URL is not set");
     }
-    pool = new Pool({ connectionString });
+    pool = new Pool({
+      connectionString,
+      connectionTimeoutMillis: 15_000,
+      idleTimeoutMillis: 30_000,
+    });
   }
   return pool;
 }

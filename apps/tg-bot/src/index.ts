@@ -786,9 +786,35 @@ registerCommand(/^\/following(?:@\w+)?$/, "/following", async (ctx) => {
   }
 });
 
+const DB_RETRY_ATTEMPTS = 3;
+const DB_RETRY_DELAY_MS = 2_000;
+
+function isRetryableDbError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|read ETIMEDOUT|connect ETIMEDOUT/i.test(msg);
+}
+
+async function withDbRetry<T>(fn: () => Promise<T>): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= DB_RETRY_ATTEMPTS; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (attempt < DB_RETRY_ATTEMPTS && isRetryableDbError(e)) {
+        console.warn(`[tg-bot] db retry attempt ${attempt}/${DB_RETRY_ATTEMPTS} after`, formatErrorForLog(e, token));
+        await new Promise((r) => setTimeout(r, DB_RETRY_DELAY_MS));
+      } else {
+        throw e;
+      }
+    }
+  }
+  throw lastErr;
+}
+
 async function pollSignals(): Promise<void> {
   try {
-    const signals = await listUnsentSignals(10);
+    const signals = await withDbRetry(() => listUnsentSignals(10));
     for (const signal of signals) {
       if (isFreshnessProtectedSignalType(signal.type)) {
         const freshness = evaluateSignalFreshness(signal);
