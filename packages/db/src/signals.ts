@@ -117,6 +117,7 @@ export async function listUnsentSignals(limit = 10): Promise<Signal[]> {
        LIMIT 1
      ) re ON true
      WHERE s.is_sent = false
+       AND s.created_at > NOW() - INTERVAL '30 minutes'
      ORDER BY s.created_at ASC
      LIMIT $1`,
     [limit],
