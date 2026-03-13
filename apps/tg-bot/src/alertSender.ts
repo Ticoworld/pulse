@@ -1,6 +1,6 @@
 import TelegramBot from "node-telegram-bot-api";
 
-export type AlertFormat = "plain" | "markdown";
+export type AlertFormat = "plain" | "markdown" | "HTML";
 
 export interface FormattedAlert {
   text: string;
@@ -66,6 +66,8 @@ export function createChatAlertSender(config: ChatAlertSenderConfig) {
 
     if (alert.format === "markdown") {
       options.parse_mode = "Markdown";
+    } else if (alert.format === "HTML") {
+      options.parse_mode = "HTML";
     }
 
     try {

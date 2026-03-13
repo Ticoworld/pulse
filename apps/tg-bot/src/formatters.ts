@@ -114,6 +114,11 @@ function shortMint(mint: string): string {
   return mint.slice(0, 8) + "…" + mint.slice(-4);
 }
 
+/** Escape HTML special characters for Telegram HTML parse_mode. */
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 /** Format a Date as "Mar 11, 12:44 PM UTC". Falls back to ISO string on error. */
 function formatTimeUtc(date: Date): string {
   try {
@@ -144,7 +149,7 @@ export function formatAlphaWalletBuySignal(
   const lines: string[] = [
     "👀 Watched whale wallet just bought",
     "",
-    `Wallet: ${walletDisplay}`,
+    `Wallet: ${escapeHtml(walletDisplay)}`,
   ];
 
   if (walletProfile && walletProfile.tier !== "low") {
@@ -157,12 +162,12 @@ export function formatAlphaWalletBuySignal(
   }
 
   if (signal.token_mint) {
-    lines.push(``, `Token: ${signal.token_mint}`, `→ https://solscan.io/token/${signal.token_mint}`);
+    lines.push(``, `CA: <code>${signal.token_mint}</code>`, `→ https://solscan.io/token/${signal.token_mint}`);
   }
 
   lines.push(`Tx: https://solscan.io/tx/${signal.signature}`);
 
-  return { text: lines.join("\n"), format: "plain", disableWebPagePreview: true };
+  return { text: lines.join("\n"), format: "HTML", disableWebPagePreview: true };
 }
 
 export function formatNewMintSignal(signal: SignalLike): FormattedAlert {
@@ -173,7 +178,7 @@ export function formatNewMintSignal(signal: SignalLike): FormattedAlert {
   const lines = [
     "🆕 New token just launched on Bags",
     "",
-    `Mint: ${mint}`,
+    `CA: <code>${mint}</code>`,
     `Launched: ${formatTimeUtc(time.value)}`,
   ];
 
@@ -185,7 +190,7 @@ export function formatNewMintSignal(signal: SignalLike): FormattedAlert {
     lines.push(`Tx: https://solscan.io/tx/${signal.signature}`);
   }
 
-  return { text: lines.join("\n"), format: "plain", disableWebPagePreview: true };
+  return { text: lines.join("\n"), format: "HTML", disableWebPagePreview: true };
 }
 
 export function formatLiquidityLiveSignal(signal: SignalLike): FormattedAlert {
@@ -197,7 +202,7 @@ export function formatLiquidityLiveSignal(signal: SignalLike): FormattedAlert {
   const lines = [
     "💧 Liquidity just went live",
     "",
-    `Token: ${mint}`,
+    `CA: <code>${mint}</code>`,
     `Time: ${formatTimeUtc(time.value)}`,
   ];
 
@@ -219,7 +224,7 @@ export function formatLiquidityLiveSignal(signal: SignalLike): FormattedAlert {
   }
   lines.push(`Tx: https://solscan.io/tx/${signal.signature}`);
 
-  return { text: lines.join("\n"), format: "plain", disableWebPagePreview: true };
+  return { text: lines.join("\n"), format: "HTML", disableWebPagePreview: true };
 }
 
 export function formatBagsEnrichmentResolvedSignal(signal: SignalLike): FormattedAlert {
@@ -232,7 +237,7 @@ export function formatBagsEnrichmentResolvedSignal(signal: SignalLike): Formatte
 
   const identity = creatorDisplay ?? (creatorWallet ? shortMint(creatorWallet) : null);
   const creatorLine = identity
-    ? `${identity}${creatorProvider ? ` · ${creatorProvider}` : ""}`
+    ? `${escapeHtml(identity)}${creatorProvider ? ` · ${escapeHtml(creatorProvider)}` : ""}`
     : null;
   const feesLine = lamportsToSol(feesLamports);
 
@@ -241,7 +246,7 @@ export function formatBagsEnrichmentResolvedSignal(signal: SignalLike): Formatte
   const lines = [
     header,
     "",
-    `Token: ${mint}`,
+    `CA: <code>${mint}</code>`,
   ];
 
   if (creatorLine) lines.push(`Creator: ${creatorLine}`);
@@ -251,7 +256,7 @@ export function formatBagsEnrichmentResolvedSignal(signal: SignalLike): Formatte
     lines.push(``, `→ https://solscan.io/token/${signal.token_mint}`);
   }
 
-  return { text: lines.join("\n"), format: "plain", disableWebPagePreview: true };
+  return { text: lines.join("\n"), format: "HTML", disableWebPagePreview: true };
 }
 
 export function formatHighInterestSignal(
@@ -274,7 +279,7 @@ export function formatHighInterestSignal(
   const lines = [
     "🔥 Strong signal detected",
     "",
-    `Token: ${mint}`,
+    `CA: <code>${mint}</code>`,
     `Confidence: ${scoreToLabel(score)}`,
     `Why: ${whyLine}`,
   ];
@@ -285,7 +290,7 @@ export function formatHighInterestSignal(
   const feesLine = lamportsToSol(bagsFees);
 
   if (bagsCreatorDisplay) {
-    lines.push(`Creator: ${bagsCreatorDisplay}${bagsCreatorProvider ? ` · ${bagsCreatorProvider}` : ""}`);
+    lines.push(`Creator: ${escapeHtml(bagsCreatorDisplay)}${bagsCreatorProvider ? ` · ${escapeHtml(bagsCreatorProvider)}` : ""}`);
   }
   if (feesLine) lines.push(`Creator fees earned: ${feesLine}`);
 
@@ -315,7 +320,7 @@ export function formatHighInterestSignal(
     lines.push(`Use /check ${signal.token_mint} for full details`);
   }
 
-  return { text: lines.join("\n"), format: "plain", disableWebPagePreview: true };
+  return { text: lines.join("\n"), format: "HTML", disableWebPagePreview: true };
 }
 
 export function formatUnknownSignal(signal: SignalLike): FormattedAlert {
@@ -427,19 +432,19 @@ export function formatTopCandidatesDigest(
     const whyStr = why.length ? why.join(" · ") : "signals fired";
 
     const creator = r.primary_creator_display_name
-      ? `${r.primary_creator_display_name}${r.primary_creator_provider ? ` · ${r.primary_creator_provider}` : ""}`
+      ? `${escapeHtml(r.primary_creator_display_name)}${r.primary_creator_provider ? ` · ${escapeHtml(r.primary_creator_provider)}` : ""}`
       : null;
 
     const feesLine = lamportsToSol(r.fees_lamports);
 
-    lines.push(`${rank}. ${shortMint(r.mint)}`);
+    lines.push(`${rank}. <code>${r.mint}</code>`);
     lines.push(`   Confidence: ${scoreToLabel(r.score)}  ·  Why: ${whyStr}`);
     if (creator) lines.push(`   Creator: ${creator}`);
     if (feesLine) lines.push(`   Creator fees: ${feesLine}`);
     lines.push("");
   }
 
-  return { text: lines.join("\n").trimEnd(), format: "plain", disableWebPagePreview: true };
+  return { text: lines.join("\n").trimEnd(), format: "HTML", disableWebPagePreview: true };
 }
 
 export interface MintSummaryView {
@@ -459,11 +464,11 @@ export function formatMintSummary(summary: MintSummaryView): FormattedAlert {
       text: [
         "Token not found in our database.",
         "",
-        `Mint: ${summary.mint}`,
+        `CA: <code>${summary.mint}</code>`,
         "",
         "This token may have launched before Pulse was running, or has not been seen yet.",
       ].join("\n"),
-      format: "plain",
+      format: "HTML",
     };
   }
 
@@ -478,16 +483,16 @@ export function formatMintSummary(summary: MintSummaryView): FormattedAlert {
   const lines = [
     "Token check",
     "",
-    `Mint: ${summary.mint}`,
+    `CA: <code>${summary.mint}</code>`,
     `Confidence: ${confidenceLabel}`,
     `Strong signal: ${strongSignal}`,
-    `Creator: ${creator}`,
+    `Creator: ${escapeHtml(creator)}`,
     `Creator fees earned: ${feesLine}`,
     ``,
     `→ https://solscan.io/token/${summary.mint}`,
   ];
 
-  return { text: lines.join("\n"), format: "plain", disableWebPagePreview: true };
+  return { text: lines.join("\n"), format: "HTML", disableWebPagePreview: true };
 }
 
 export function formatFollowedHighInterestAlert(signal: SignalLike): FormattedAlert {
@@ -508,13 +513,13 @@ export function formatFollowedHighInterestAlert(signal: SignalLike): FormattedAl
   const lines = [
     "🔔 Update on a token you follow",
     "",
-    `Token: ${mint}`,
+    `CA: <code>${mint}</code>`,
     `Confidence: ${scoreToLabel(score)}`,
     `Why: ${whyLine}`,
   ];
 
   if (creatorDisplay) {
-    lines.push(`Creator: ${creatorDisplay}${creatorProvider ? ` · ${creatorProvider}` : ""}`);
+    lines.push(`Creator: ${escapeHtml(creatorDisplay)}${creatorProvider ? ` · ${escapeHtml(creatorProvider)}` : ""}`);
   }
   const feesLine = lamportsToSol(feesLamports);
   if (feesLine) lines.push(`Creator fees earned: ${feesLine}`);
@@ -523,5 +528,5 @@ export function formatFollowedHighInterestAlert(signal: SignalLike): FormattedAl
     lines.push(``, `→ https://solscan.io/token/${signal.token_mint}`);
   }
 
-  return { text: lines.join("\n"), format: "plain", disableWebPagePreview: true };
+  return { text: lines.join("\n"), format: "HTML", disableWebPagePreview: true };
 }
