@@ -386,8 +386,32 @@ export async function runEngine(): Promise<() => void> {
   // Kick off immediately
   tick().catch((err) => console.error("[engine] fatal tick error:", err));
 
+  // Hourly cleanup: delete raw_events older than 7 days (SWAP/TRANSFER only)
+  // to prevent the table from growing unbounded.
+  const CLEANUP_INTERVAL_MS = 60 * 60 * 1_000;
+  async function cleanupOldRawEvents() {
+    try {
+      const result = await query(
+        `DELETE FROM raw_events
+         WHERE event_type IN ('SWAP', 'TRANSFER')
+           AND created_at < NOW() - INTERVAL '7 days'`,
+      );
+      const deleted = result.rowCount ?? 0;
+      if (deleted > 0) {
+        console.log(`[engine] cleanup: deleted ${deleted} old SWAP/TRANSFER raw_events`);
+      }
+    } catch (err) {
+      console.error("[engine] cleanup error:", err);
+    }
+  }
+  const cleanupTimer = setInterval(
+    () => cleanupOldRawEvents().catch(() => {}),
+    CLEANUP_INTERVAL_MS,
+  );
+
   return () => {
     stopped = true;
     if (timer) clearTimeout(timer);
+    clearInterval(cleanupTimer);
   };
 }
