@@ -101,7 +101,14 @@ const COOLDOWN_COMMANDS = ["/top_candidates", "/hot", "/mint", "/check"];
 const FOLLOWED_HIGH_INTEREST_DELIVERY_KIND = "followed_high_interest";
 const OWNER_SIGNAL_DELIVERY_KIND = "owner_signal";
 
-const bot = new TelegramBot(token, { polling: true });
+// Delay before first poll so the previous deploy instance can release the lock.
+// Prevents 409 Conflict when Railway starts new container before old one fully stops.
+const TELEGRAM_STARTUP_DELAY_MS = Number.parseInt(
+  process.env.TELEGRAM_STARTUP_DELAY_MS ?? "15000",
+  10,
+);
+
+const bot = new TelegramBot(token, { polling: false });
 const sendChatAlert = createChatAlertSender({
   bot,
   botTokenForRedaction: token,
@@ -124,7 +131,32 @@ bot.setMyCommands([
   console.error("[tg-bot] setMyCommands failed:", err);
 });
 
-bot.on("polling_error", (err) => {
+const CONFLICT_RETRY_DELAY_MS = 15_000;
+const CONFLICT_MAX_RETRIES = 5;
+
+bot.on("polling_error", async (err: unknown) => {
+  const msg = String((err as Error)?.message ?? err);
+  const is409 = msg.includes("409") || msg.includes("Conflict") || msg.includes("getUpdates");
+  if (is409) {
+    console.warn("[tg-bot] 409 Conflict — another instance may still be polling. Will retry in", CONFLICT_RETRY_DELAY_MS / 1000, "s");
+    try {
+      await bot.stopPolling();
+    } catch {
+      /* ignore */
+    }
+    for (let attempt = 1; attempt <= CONFLICT_MAX_RETRIES; attempt++) {
+      await new Promise((r) => setTimeout(r, CONFLICT_RETRY_DELAY_MS));
+      try {
+        await bot.startPolling();
+        console.log("[tg-bot] polling resumed after 409 retry");
+        return;
+      } catch (e) {
+        console.warn("[tg-bot] 409 retry", attempt, "failed:", formatErrorForLog(e, token));
+      }
+    }
+    console.error("[tg-bot] 409 retries exhausted — polling disabled");
+    return;
+  }
   console.error("[tg-bot] polling_error:", formatErrorForLog(err, token));
 });
 
@@ -1003,7 +1035,17 @@ Promise.all([pollSignals(), pollExecutionOrders()]).catch((err) => {
   console.error("[tg-bot] unhandled initial poll error:", formatErrorForLog(err, token));
 });
 
-console.log("[tg-bot] running - polling for updates and signals...");
+(async () => {
+  if (TELEGRAM_STARTUP_DELAY_MS > 0) {
+    console.log("[tg-bot] waiting", TELEGRAM_STARTUP_DELAY_MS / 1000, "s before polling (deploy overlap guard)...");
+    await new Promise((r) => setTimeout(r, TELEGRAM_STARTUP_DELAY_MS));
+  }
+  await bot.startPolling();
+  console.log("[tg-bot] running - polling for updates and signals...");
+})().catch((err) => {
+  console.error("[tg-bot] failed to start polling:", formatErrorForLog(err, token));
+  process.exit(1);
+});
 
 // Graceful shutdown: stop Telegram polling before process exits so the next
 // deploy instance does not get a 409 Conflict from a competing getUpdates call.
